@@ -9,6 +9,7 @@ coverage/
 .DS_Store
 *.log
 *.tsbuildinfo
+.codex_write_test
 
 # Local env files
 .env
