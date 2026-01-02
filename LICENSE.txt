@@ -1,0 +1,38 @@
+MIT License
+
+Copyright (c) 2024 Clicksmith Team
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+End User License Agreement (EULA)
+
+1. Permitted Use
+You may use Clicksmith for lawful automation tasks on your local machine.
+
+2. Prohibited Use
+You expressly agree NOT to use Clicksmith for:
+- Cheating in online multiplayer games or competitive services.
+- Automating interactions with services that prohibit automation in their Terms of Service.
+- Bypassing security measures or CAPTCHAs.
+- Malicious activities or distributing malware.
+
+3. Responsibility
+You are solely responsible for ensuring your use of Clicksmith complies with the Terms of Service of any target application or website. The authors assume no liability for account bans or legal consequences resulting from misuse.

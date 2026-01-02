@@ -1,0 +1,20 @@
+node_modules/
+dist/
+build/
+out/
+coverage/
+.cache/
+.parcel-cache/
+.turbo/
+.DS_Store
+*.log
+*.tsbuildinfo
+
+# Local env files
+.env
+.env.*.local
+.env.local
+
+# Editor/IDE
+.vscode/
+.idea/

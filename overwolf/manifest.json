@@ -1,0 +1,42 @@
+{
+  "manifest_version": "1.0.0",
+  "type": "WebApp",
+  "meta": {
+    "name": "Clicksmith",
+    "author": "Clicksmith Team",
+    "description": "Overlay-based human-in-the-loop input automation (Overwolf build)",
+    "version": "0.1.0",
+    "minimum-overwolf-version": "0.173.0"
+  },
+  "permissions": ["Overlay", "Hotkeys", "Game", "Profile"],
+  "start_window": "clicksmith_main",
+  "windows": {
+    "clicksmith_main": {
+      "file": "index.html",
+      "transparent": false,
+      "resizable": true,
+      "size": {
+        "width": 1200,
+        "height": 800
+      }
+    },
+    "clicksmith_overlay": {
+      "file": "overlay.html",
+      "transparent": true,
+      "always_on_top": true,
+      "resizable": false,
+      "show_in_taskbar": false,
+      "size": {
+        "width": 360,
+        "height": 140
+      }
+    }
+  },
+  "data": {
+    "hotkeys": {
+      "toggle_recording": "F9",
+      "toggle_playback": "F10",
+      "takeover": "F11"
+    }
+  }
+}

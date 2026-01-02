@@ -1,0 +1,11 @@
+CLICKSMITH END USER LICENSE AGREEMENT
+
+By installing or using Clicksmith, you agree to the following:
+
+1. You will NOT use Clicksmith in any online or competitive service that prohibits automation.
+2. You are responsible for complying with the Terms of Service of any target application.
+3. Clicksmith does not inject into or modify other processes, nor does it read game memory.
+4. Clicksmith uses OS-level input hooks and screen capture only when you initiate recording/playback.
+5. Clicksmith stores profiles and screenshots locally unless you opt in to cloud sync.
+
+If you do not agree to these terms, do not install or use Clicksmith.

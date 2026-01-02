@@ -1,0 +1,81 @@
+:root {
+  --bg: #0d1016;
+  --panel: #141a24;
+  --accent: #f9734d;
+  --ink: #f4f1ed;
+  --ink-muted: rgba(244, 241, 237, 0.7);
+  --outline: rgba(255, 255, 255, 0.12);
+  --radius: 16px;
+  --font-sans: "Space Grotesk", "Avenir Next", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  color: var(--ink);
+  background: radial-gradient(900px 450px at 5% 5%, #223147 0%, transparent 70%), var(--bg);
+}
+
+.shell {
+  padding: 24px;
+  display: grid;
+  gap: 16px;
+}
+
+.panel {
+  background: var(--panel);
+  border-radius: var(--radius);
+  border: 1px solid var(--outline);
+  padding: 16px;
+}
+
+.pill {
+  font-size: 12px;
+  color: var(--ink-muted);
+}
+
+.btn {
+  padding: 10px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--outline);
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.btn-primary {
+  background: linear-gradient(120deg, var(--accent), #ff8f67);
+  color: #101114;
+  font-weight: 600;
+  border-color: transparent;
+}
+
+.overlay {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+}
+
+.overlay-card {
+  width: 320px;
+  padding: 16px;
+  background: rgba(14, 18, 26, 0.78);
+  border: 1px solid var(--outline);
+  border-radius: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.overlay-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.overlay-actions .btn {
+  flex: 1;
+}

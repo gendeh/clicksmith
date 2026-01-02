@@ -1,0 +1,1 @@
+Clicksmith is for lawful automation on local workflows. Do not use it in online or competitive services that prohibit automation. Clicksmith does not inject into memory or modify target apps; it uses OS-level input hooks and on-screen matching only.
