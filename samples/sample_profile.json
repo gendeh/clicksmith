@@ -1,0 +1,27 @@
+{
+  "id": "sample-profile-1",
+  "name": "Sample Run",
+  "target_app": "Notepad",
+  "created_at": "2024-01-01T12:00:00Z",
+  "events": [
+    {
+      "t_ms": 120,
+      "type": "mouse",
+      "btn": "left",
+      "x": 640,
+      "y": 420,
+      "rel_x": 0.5,
+      "rel_y": 0.5,
+      "duration_ms": 12,
+      "img_patch_b64": "",
+      "img_hash": "sha256:demo",
+      "human_override": false
+    }
+  ],
+  "success_metric": {
+    "furthest_frame": 0,
+    "score": 0.0
+  },
+  "version": 1,
+  "notes": "Sample profile for local testing"
+}

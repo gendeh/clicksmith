@@ -3,7 +3,7 @@ import { ImageMatchRequest, ImageMatchResponse, MatchResult } from '../types';
 export class ImageService {
   private endpoint: string;
 
-  constructor(endpoint: string = 'http://localhost:5001') {
+  constructor(endpoint: string = process.env.CLICKSMITH_IMAGE_URL || 'http://127.0.0.1:5001') {
     this.endpoint = endpoint;
   }
 

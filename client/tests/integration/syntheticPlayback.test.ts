@@ -78,7 +78,8 @@ describe('Synthetic recording + playback', () => {
 
     const fakePlayer = {
       moveMouse: jest.fn(),
-      clickWithDuration: async () => undefined,
+      mouseDown: jest.fn(),
+      mouseUp: jest.fn(),
       keyDown: jest.fn(),
       keyUp: jest.fn(),
     };
@@ -106,5 +107,6 @@ describe('Synthetic recording + playback', () => {
 
     expect(Math.abs(status.timingDrift)).toBeLessThan(20);
     expect(matchRate).toBeGreaterThanOrEqual(0.95);
+    jest.useRealTimers();
   });
 });

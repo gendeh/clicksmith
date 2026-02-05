@@ -3,6 +3,7 @@ import { EventEmitter } from 'events';
 export type HookEventName = 'mousedown' | 'mouseup' | 'mousemove' | 'keydown' | 'keyup';
 
 export interface HookMouseEvent {
+  time?: number;
   x: number;
   y: number;
   button?: number;
@@ -14,6 +15,7 @@ export interface HookMouseEvent {
 }
 
 export interface HookKeyEvent {
+  time?: number;
   keycode: number;
   rawcode?: number;
   keychar?: number;

@@ -12,7 +12,7 @@ export const listProfiles = async (req: Request, res: Response) => {
   const ownerId = getUserId(req);
   if (db) {
     const snapshot = await db.collection('profiles').where('ownerId', '==', ownerId).get();
-    const profiles = snapshot.docs.map(doc => doc.data());
+    const profiles = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
     res.json(profiles);
     return;
   }
@@ -28,7 +28,7 @@ export const getProfile = async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Profile not found' });
       return;
     }
-    const data = doc.data() as Profile;
+    const data = { id: doc.id, ...(doc.data() as Profile) };
     if (data.ownerId && data.ownerId !== ownerId) {
       res.status(403).json({ error: 'Forbidden' });
       return;

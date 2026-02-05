@@ -25,6 +25,10 @@ Overlay-first, human-in-the-loop input automation for safe, local workflows. The
 
 Clicksmith does **not** inject into other processes or read game memory. It uses OS-level input APIs only. Do not use Clicksmith in any online or competitive service that prohibits automation. Users are responsible for complying with target app terms.
 
+## Mods (Optional)
+
+Clicksmith can surface external game mods via a registry, but mods run inside the game process and must be installed separately. See `docs/mods/manifest.md` and `docs/mods/protocol.md` for the adapter format and protocol.
+
 ## Local Development
 
 ### Prerequisites
@@ -56,6 +60,11 @@ Or individually:
 cd client && npm run build && npm run package
 cd ../backend && npm run build
 makensis installer/clicksmith.nsi
+```
+
+### Testing
+```bash
+npm test
 ```
 
 ## Architecture

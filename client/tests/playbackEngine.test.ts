@@ -66,7 +66,8 @@ describe('PlaybackEngine', () => {
     const actions: string[] = [];
     const fakePlayer = {
       moveMouse: () => actions.push('move'),
-      clickWithDuration: async () => actions.push('click'),
+      mouseDown: () => actions.push('mouseDown'),
+      mouseUp: () => actions.push('mouseUp'),
       keyDown: () => actions.push('keyDown'),
       keyUp: () => actions.push('keyUp'),
     };
@@ -79,8 +80,10 @@ describe('PlaybackEngine', () => {
     await engine.start(config, baseProfile);
     jest.advanceTimersByTime(200);
 
-    expect(actions).toContain('click');
+    expect(actions).toContain('mouseDown');
+    expect(actions).toContain('mouseUp');
     expect(actions).toContain('keyDown');
     expect(engine.getStatus().state).toBe('idle');
+    jest.useRealTimers();
   });
 });

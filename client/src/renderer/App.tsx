@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AutoTuneSettings,
   IPC_CHANNELS,
@@ -6,6 +6,7 @@ import {
   Profile,
   SubscriptionStatus,
   UserPreferences,
+  ModAdapterStatus,
   WindowInfo,
 } from '../types';
 
@@ -41,17 +42,43 @@ const App: React.FC = () => {
   const [subscription, setSubscription] = useState<SubscriptionStatus | null>(null);
   const [eulaAccepted, setEulaAccepted] = useState(true);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
+  const [billingMessage, setBillingMessage] = useState<string | null>(null);
+  const [modAdapters, setModAdapters] = useState<ModAdapterStatus[]>([]);
+  const [modMessage, setModMessage] = useState<string | null>(null);
   const [saveForm, setSaveForm] = useState({
     name: '',
     notes: '',
     tags: '',
     autoTune: false,
   });
+  const draftRef = useRef<DraftProfile | null>(null);
+
+  useEffect(() => {
+    if (!isOverlay) return;
+    document.body.classList.add('overlay-mode');
+    return () => document.body.classList.remove('overlay-mode');
+  }, [isOverlay]);
 
   const selectedProfile = useMemo(
     () => profiles.find(profile => profile.id === selectedProfileId) ?? null,
     [profiles, selectedProfileId]
   );
+
+  useEffect(() => {
+    if (!selectedProfileId && profiles.length > 0) {
+      setSelectedProfileId(profiles[0].id);
+    }
+  }, [profiles, selectedProfileId]);
+
+  useEffect(() => {
+    if (selectedProfileId) {
+      void ipcRenderer.invoke(IPC_CHANNELS.PLAYBACK_SELECT, { profileId: selectedProfileId });
+    }
+  }, [selectedProfileId]);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
 
   useEffect(() => {
     void ipcRenderer.invoke(IPC_CHANNELS.PROFILE_LIST).then((data: Profile[]) => setProfiles(data || []));
@@ -61,6 +88,7 @@ const App: React.FC = () => {
       setSubscription(data.subscription);
       setEulaAccepted(data.eulaAccepted);
     });
+    void ipcRenderer.invoke(IPC_CHANNELS.MODS_LIST).then((data: ModAdapterStatus[]) => setModAdapters(data || []));
 
     ipcRenderer.on(IPC_CHANNELS.RECORDING_STATUS, (_: any, status: { state: string }) => {
       setRecordingState(status.state);
@@ -85,10 +113,11 @@ const App: React.FC = () => {
 
     ipcRenderer.on('profile:saved', (_: any, profile: Profile) => {
       setProfiles(prev => [profile, ...prev.filter(item => item.id !== profile.id)]);
+      setSelectedProfileId(profile.id);
     });
 
     ipcRenderer.on(IPC_CHANNELS.PROFILE_SAVE_REQUEST, () => {
-      if (draft) {
+      if (draftRef.current) {
         setShowSaveModal(true);
       }
     });
@@ -100,7 +129,7 @@ const App: React.FC = () => {
       ipcRenderer.removeAllListeners('profile:saved');
       ipcRenderer.removeAllListeners(IPC_CHANNELS.PROFILE_SAVE_REQUEST);
     };
-  }, [draft]);
+  }, []);
 
   const startRecording = () => {
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_START, { target: activeTarget });
@@ -110,9 +139,25 @@ const App: React.FC = () => {
     ipcRenderer.invoke(IPC_CHANNELS.RECORDING_STOP);
   };
 
-  const startPlayback = () => {
+  const startPlayback = async () => {
     if (!selectedProfile) return;
-    ipcRenderer.invoke(IPC_CHANNELS.PLAYBACK_START, { profileId: selectedProfile.id, target: activeTarget });
+    const result = await ipcRenderer.invoke(IPC_CHANNELS.PLAYBACK_START, {
+      profileId: selectedProfile.id,
+      target: activeTarget,
+    });
+    if (result?.success === false) {
+      setPlaybackStatus({
+        state: 'idle',
+        currentEventIndex: 0,
+        totalEvents: 0,
+        elapsedMs: 0,
+        successfulMatches: 0,
+        failedMatches: 0,
+        retries: 0,
+        timingDrift: 0,
+        lastError: result.error ?? 'playback_start_failed',
+      });
+    }
   };
 
   const stopPlayback = () => {
@@ -154,34 +199,128 @@ const App: React.FC = () => {
     });
   };
 
+  const handleDeleteSelected = async () => {
+    if (!selectedProfile) return;
+    const confirmed = window.confirm(`Delete profile "${selectedProfile.name}"? This cannot be undone.`);
+    if (!confirmed) return;
+    await ipcRenderer.invoke(IPC_CHANNELS.PROFILE_DELETE, selectedProfile.id);
+    const next = profiles.filter(profile => profile.id !== selectedProfile.id);
+    setProfiles(next);
+    setSelectedProfileId(next[0]?.id ?? null);
+  };
+
   const acceptEula = () => {
     ipcRenderer.invoke(IPC_CHANNELS.EULA_ACCEPT, true);
     setEulaAccepted(true);
   };
 
-  const handleUpgrade = () => {
-    ipcRenderer.invoke(IPC_CHANNELS.BILLING_CHECKOUT, { priceId: 'price_pro_monthly' });
+  const formatBillingError = (error?: string) => {
+    if (!error) {
+      return 'Billing service unavailable. Start the backend or set CLICKSMITH_API_URL.';
+    }
+    if (error.includes('ECONNREFUSED')) {
+      return 'Billing service offline. Start `backend` or set CLICKSMITH_API_URL.';
+    }
+    return error;
+  };
+
+  const handleUpgrade = async () => {
+    setBillingMessage(null);
+    const result = await ipcRenderer.invoke(IPC_CHANNELS.BILLING_CHECKOUT, { priceId: 'price_pro_monthly' });
+    if (!result?.success) {
+      setBillingMessage(formatBillingError(result?.error));
+    }
+  };
+
+  const handleSnapPhaseChange = (value: string) => {
+    if (!preferences) return;
+    if (value.trim() === '') return;
+    const parsed = Number.parseFloat(value);
+    if (!Number.isFinite(parsed)) return;
+    const clamped = Math.min(4, Math.max(-4, parsed));
+    ipcRenderer
+      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+        defaultPlaybackConfig: {
+          ...preferences.defaultPlaybackConfig,
+          snapPhaseMs: clamped,
+        },
+      })
+      .then((updated: UserPreferences) => setPreferences(updated));
+  };
+
+  const refreshMods = async () => {
+    const data = await ipcRenderer.invoke(IPC_CHANNELS.MODS_LIST);
+    setModAdapters(data || []);
+  };
+
+  const geodeAdapter = modAdapters.find(adapter => adapter.adapter.id === 'geode-geometry-dash');
+
+  const handleModProbe = async (id: string) => {
+    setModMessage(null);
+    const result = await ipcRenderer.invoke(IPC_CHANNELS.MODS_PROBE, { id });
+    if (!result?.success) {
+      setModMessage(result?.error ?? 'Mod probe failed.');
+      return;
+    }
+    if (result?.status) {
+      setModAdapters(prev =>
+        prev.map(item => (item.adapter.id === result.status.adapter.id ? result.status : item))
+      );
+    } else {
+      await refreshMods();
+    }
+  };
+
+  const handleModLaunch = async (id: string) => {
+    setModMessage(null);
+    const result = await ipcRenderer.invoke(IPC_CHANNELS.MODS_LAUNCH, { id });
+    if (!result?.success) {
+      setModMessage(result?.error ?? 'Launch failed.');
+    }
+  };
+
+  const handleModDocs = async (id: string) => {
+    setModMessage(null);
+    const result = await ipcRenderer.invoke(IPC_CHANNELS.MODS_OPEN_DOC, { id });
+    if (!result?.success) {
+      setModMessage(result?.error ?? 'Unable to open instructions.');
+    }
+  };
+
+  const handleModDownload = async (url?: string) => {
+    if (!url) return;
+    setModMessage(null);
+    const result = await ipcRenderer.invoke(IPC_CHANNELS.MODS_OPEN_URL, { url });
+    if (!result?.success) {
+      setModMessage(result?.error ?? 'Unable to open download.');
+    }
   };
 
   if (isOverlay) {
     return (
       <div className="overlay-root">
-        <div className="overlay-card">
-          <div className="brand">
-            <div className="brand-title">Clicksmith</div>
-            <div className="brand-subtitle">Overlay Control</div>
+        <div
+          className="overlay-bar"
+          onMouseEnter={() => ipcRenderer.send('overlay:set-interactive', true)}
+          onMouseLeave={() => ipcRenderer.send('overlay:set-interactive', false)}
+        >
+          <div className="overlay-status">
+            <span className={`dot ${recordingState === 'recording' ? 'dot-rec-live' : ''}`} />
+            <span className="overlay-label">REC</span>
+            <span className={`dot ${playbackStatus?.state === 'playing' ? 'dot-play-live' : ''}`} />
+            <span className="overlay-label">PLAY</span>
           </div>
           <div className="overlay-actions">
-            <button className="btn btn-primary" onClick={recordingState === 'recording' ? stopRecording : startRecording}>
-              {recordingState === 'recording' ? 'Stop (F9)' : 'Record (F9)'}
+            <button className="btn btn-overlay" onClick={recordingState === 'recording' ? stopRecording : startRecording}>
+              {recordingState === 'recording' ? 'Stop' : 'Rec'} F9
             </button>
-            <button className="btn btn-ghost" onClick={playbackStatus?.state === 'playing' ? stopPlayback : startPlayback}>
-              {playbackStatus?.state === 'playing' ? 'Stop (F10)' : 'Play (F10)'}
+            <button className="btn btn-overlay" onClick={playbackStatus?.state === 'playing' ? stopPlayback : startPlayback}>
+              {playbackStatus?.state === 'playing' ? 'Stop' : 'Play'} F10
+            </button>
+            <button className="btn btn-overlay takeover" onClick={triggerTakeover}>
+              Takeover
             </button>
           </div>
-          <button className="btn btn-mint takeover" onClick={triggerTakeover}>
-            Takeover (F11)
-          </button>
         </div>
       </div>
     );
@@ -257,45 +396,38 @@ const App: React.FC = () => {
         </div>
       )}
 
-      <header className="app-header">
-        <div className="brand">
-          <div className="brand-title">Clicksmith</div>
-          <div className="brand-subtitle">Human-in-the-loop input automation</div>
-        </div>
-        <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-          <div className="pill">{subscription?.tier.toUpperCase() ?? 'FREE'} Tier</div>
+      <header className="topbar">
+        <div className="logo">Clicksmith</div>
+        <div className="topbar-actions">
+          <div className={`chip ${recordingState === 'recording' ? 'chip-live' : ''}`}>
+            REC · {recordingState === 'recording' ? 'Live' : 'Idle'}
+          </div>
+          <div className={`chip ${playbackStatus?.state === 'playing' ? 'chip-live' : ''}`}>
+            PLAY · {playbackStatus?.state === 'playing' ? 'Running' : 'Ready'}
+          </div>
+          <div className="chip">TARGET · {activeTarget}</div>
+          <div className="chip">{subscription?.tier.toUpperCase() ?? 'FREE'}</div>
           {subscription?.tier === 'free' && (
             <button className="btn btn-primary" onClick={handleUpgrade}>
-              Upgrade to Pro
+              Upgrade
             </button>
           )}
         </div>
       </header>
 
-      <section className="status-row">
-        <div className="status-card">
-          <h3>Recording</h3>
-          <strong>{recordingState === 'recording' ? 'Active' : 'Idle'}</strong>
-          <div className="profile-meta">Hotkey: F9</div>
-        </div>
-        <div className="status-card">
-          <h3>Playback</h3>
-          <strong>{playbackStatus?.state === 'playing' ? 'Running' : 'Ready'}</strong>
-          <div className="profile-meta">
-            Drift: {playbackStatus?.timingDrift?.toFixed(1) ?? 0} ms
-          </div>
-        </div>
-        <div className="status-card">
-          <h3>Target Window</h3>
-          <strong>{activeTarget}</strong>
-          <div className="profile-meta">Overlay stays on top</div>
-        </div>
-      </section>
+      {playbackStatus?.lastError && (
+        <div className="inline-alert">Playback error: {playbackStatus.lastError}</div>
+      )}
 
-      <div className="grid">
-        <section className="panel">
-          <h2>Controls</h2>
-          <div style={{ display: 'grid', gap: 10 }}>
+      {billingMessage && <div className="inline-alert">{billingMessage}</div>}
+
+      <main className="layout">
+        <section className="card controls-card">
+          <div className="card-header">
+            <h2>Controls</h2>
+            <span className="hint">Hotkeys: F9 · F10 · Auto takeover on click</span>
+          </div>
+          <div className="control-stack">
             <button
               className="btn btn-primary"
               onClick={recordingState === 'recording' ? stopRecording : startRecording}
@@ -314,8 +446,8 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          <div>
-            <h3 className="profile-meta">Target window</h3>
+          <div className="field">
+            <span className="field-label">Target window</span>
             <select
               className="input"
               value={activeTarget}
@@ -330,32 +462,38 @@ const App: React.FC = () => {
             </select>
           </div>
 
-          <div style={{ display: 'grid', gap: 8 }}>
+          <div className="split-actions">
             <button className="btn btn-ghost" onClick={handleImport}>
-              Import Profiles
+              Import
             </button>
             <button className="btn btn-ghost" onClick={handleExport}>
-              Export Profiles
+              Export
             </button>
           </div>
         </section>
 
-        <section className="panel">
-          <h2>Profile Library</h2>
-          <div className="panel-scroll">
+        <section className="card profiles-card">
+          <div className="card-header">
+            <h2>Profiles</h2>
+            <span className="hint">{profiles.length} saved</span>
+          </div>
+          <div className="card-scroll">
             {profiles.length === 0 && (
               <div className="profile-meta">No profiles yet. Record a run to get started.</div>
             )}
             {profiles.map((profile, index) => (
               <div
                 key={profile.id}
-                className="profile-card"
-                style={{ animationDelay: `${index * 60}ms` }}
+                className={`profile-card ${selectedProfileId === profile.id ? 'profile-card-active' : ''}`}
+                style={{ animationDelay: `${index * 40}ms` }}
                 onClick={() => setSelectedProfileId(profile.id)}
               >
-                <strong>{profile.name}</strong>
+                <div className="profile-title">
+                  <strong>{profile.name}</strong>
+                  {selectedProfileId === profile.id && <span className="tag">Selected</span>}
+                </div>
                 <div className="profile-meta">
-                  {profile.events.length} events • {profile.target_app}
+                  {profile.events.length} events · {profile.target_app}
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {profile.metadata?.tags?.map(tag => (
@@ -364,62 +502,195 @@ const App: React.FC = () => {
                     </span>
                   ))}
                 </div>
-                {selectedProfileId === profile.id && <span className="pill">Selected</span>}
               </div>
             ))}
           </div>
+          <div className="split-actions">
+            <button className="btn btn-danger" onClick={handleDeleteSelected} disabled={!selectedProfile}>
+              Delete
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={playbackStatus?.state === 'playing' ? stopPlayback : startPlayback}
+              disabled={!selectedProfile}
+            >
+              {playbackStatus?.state === 'playing' ? 'Stop' : 'Play'}
+            </button>
+          </div>
         </section>
 
-        <section className="panel">
-          <h2>Settings</h2>
-          <div className="profile-meta">
-            Shortcuts: Record F9 • Play F10 • Takeover F11 • Quick Replay F12
+        <section className="card settings-card">
+          <div className="card-header">
+            <h2>Settings</h2>
+            <span className="hint">Geode + timing controls</span>
           </div>
-          <label className="pill">
-            <input
-              type="checkbox"
-              checked={preferences?.telemetryOptIn ?? false}
-              onChange={event =>
-                ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SET, {
-                  telemetryOptIn: event.target.checked,
-                })
-              }
-            />
-            Minimal telemetry (opt-in)
-          </label>
-          <label className="pill">
-            <input
-              type="checkbox"
-              checked={preferences?.defaultPlaybackConfig.useImageMatching ?? true}
-              onChange={event =>
-                ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SET, {
-                  defaultPlaybackConfig: {
-                    ...preferences?.defaultPlaybackConfig,
-                    useImageMatching: event.target.checked,
-                  },
-                })
-              }
-            />
-            SmartClick image matching
-          </label>
-          <label className="pill">
-            <input
-              type="checkbox"
-              checked={preferences?.cloudSyncOptIn ?? false}
-              onChange={event =>
-                ipcRenderer.invoke(IPC_CHANNELS.SETTINGS_SET, {
-                  cloudSyncOptIn: event.target.checked,
-                })
-              }
-              disabled={!subscription?.features.cloudSync}
-            />
-            Cloud sync (opt-in)
-          </label>
-          <div className="profile-meta">
-            {subscription?.features.cloudSync ? 'Cloud sync enabled' : 'Cloud sync (Pro)'}
+          <div className="card-scroll">
+            <div className="settings-grid">
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={preferences?.telemetryOptIn ?? false}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        telemetryOptIn: event.target.checked,
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                />
+                Minimal telemetry
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={preferences?.autoTakeoverOnInput ?? true}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        autoTakeoverOnInput: event.target.checked,
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                />
+                Auto takeover on click (playback)
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={preferences?.defaultPlaybackConfig.useImageMatching ?? true}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        defaultPlaybackConfig: {
+                          ...preferences?.defaultPlaybackConfig,
+                          useImageMatching: event.target.checked,
+                        },
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                />
+                SmartClick matching
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={preferences?.useModAdapter ?? false}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        useModAdapter: event.target.checked,
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                  disabled={!geodeAdapter || geodeAdapter.connection !== 'connected'}
+                />
+                Use Geode adapter
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={(preferences?.defaultPlaybackConfig.snapToHz ?? 240) > 0}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        defaultPlaybackConfig: {
+                          ...preferences?.defaultPlaybackConfig,
+                          snapToHz: event.target.checked ? 240 : 0,
+                        },
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                />
+                240Hz snap
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={(preferences?.defaultPlaybackConfig.snapMode ?? 'duration-lock') === 'duration-lock'}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        defaultPlaybackConfig: {
+                          ...preferences?.defaultPlaybackConfig,
+                          snapMode: event.target.checked ? 'duration-lock' : 'nearest',
+                        },
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                />
+                Lock hold to ticks
+              </label>
+              <label className="toggle">
+                <input
+                  type="checkbox"
+                  checked={preferences?.cloudSyncOptIn ?? false}
+                  onChange={event =>
+                    ipcRenderer
+                      .invoke(IPC_CHANNELS.SETTINGS_SET, {
+                        cloudSyncOptIn: event.target.checked,
+                      })
+                      .then((updated: UserPreferences) => setPreferences(updated))
+                  }
+                  disabled={!subscription?.features.cloudSync}
+                />
+                Cloud sync
+              </label>
+            </div>
+
+            <div className="field">
+              <span className="field-label">Tick phase offset (ms)</span>
+              <input
+                className="input"
+                type="number"
+                min={-4}
+                max={4}
+                step={0.1}
+                value={preferences?.defaultPlaybackConfig.snapPhaseMs ?? 0}
+                onChange={event => handleSnapPhaseChange(event.target.value)}
+              />
+            </div>
+
+            <div className="adapter-card">
+              <div>
+                <div className="adapter-title">Geode Adapter</div>
+                <div className="profile-meta">
+                  {geodeAdapter ? `Connection: ${geodeAdapter.connection}` : 'No adapter configured.'}
+                </div>
+                {geodeAdapter?.lastError && <div className="profile-meta">Last error: {geodeAdapter.lastError}</div>}
+              </div>
+              <div className="adapter-actions">
+                <button className="btn btn-ghost" onClick={() => handleModProbe(geodeAdapter?.adapter.id ?? '')}>
+                  Check
+                </button>
+                {geodeAdapter?.adapter.launch && (
+                  <button className="btn btn-primary" onClick={() => handleModLaunch(geodeAdapter.adapter.id)}>
+                    Launch
+                  </button>
+                )}
+              </div>
+            </div>
+            {modMessage && <div className="profile-meta">{modMessage}</div>}
+            <div className="adapter-links">
+              {geodeAdapter?.adapter.install?.instructionsPath && (
+                <button className="btn btn-ghost" onClick={() => handleModDocs(geodeAdapter.adapter.id)}>
+                  Install Notes
+                </button>
+              )}
+              {geodeAdapter?.adapter.install?.downloadUrl && (
+                <button
+                  className="btn btn-ghost"
+                  onClick={() => handleModDownload(geodeAdapter.adapter.install?.downloadUrl)}
+                >
+                  Download
+                </button>
+              )}
+              <button className="btn btn-ghost" onClick={refreshMods}>
+                Refresh
+              </button>
+            </div>
           </div>
         </section>
-      </div>
+      </main>
     </div>
   );
 };

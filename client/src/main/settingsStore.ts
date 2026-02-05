@@ -19,8 +19,13 @@ const DEFAULT_PREFERENCES: UserPreferences = {
     speedMultiplier: 1,
     useRelativeCoords: true,
     imageSearchRadius: 160,
+    snapToHz: 240,
+    snapMode: 'duration-lock',
+    snapPhaseMs: 0,
   },
   hotkeys: DEFAULT_HOTKEYS,
+  useModAdapter: false,
+  autoTakeoverOnInput: true,
   showEulaReminder: true,
   telemetryOptIn: false,
   cloudSyncOptIn: false,
@@ -40,7 +45,23 @@ export class SettingsStore {
   }
 
   public getPreferences(): UserPreferences {
-    return this.store.get('preferences', DEFAULT_PREFERENCES) as UserPreferences;
+    const stored = this.store.get('preferences', DEFAULT_PREFERENCES) as UserPreferences;
+    return {
+      ...DEFAULT_PREFERENCES,
+      ...stored,
+      defaultRecordingConfig: {
+        ...DEFAULT_PREFERENCES.defaultRecordingConfig,
+        ...(stored?.defaultRecordingConfig ?? {}),
+      },
+      defaultPlaybackConfig: {
+        ...DEFAULT_PREFERENCES.defaultPlaybackConfig,
+        ...(stored?.defaultPlaybackConfig ?? {}),
+      },
+      hotkeys: {
+        ...DEFAULT_PREFERENCES.hotkeys,
+        ...(stored?.hotkeys ?? {}),
+      },
+    };
   }
 
   public setPreferences(preferences: Partial<UserPreferences>): UserPreferences {
@@ -50,12 +71,20 @@ export class SettingsStore {
   }
 
   public getSubscription(): SubscriptionStatus {
-    return this.store.get('subscription', DEFAULT_SUBSCRIPTION) as SubscriptionStatus;
+    const stored = this.store.get('subscription', DEFAULT_SUBSCRIPTION) as SubscriptionStatus;
+    return {
+      ...stored,
+      features: stored.features ?? TIER_LIMITS[stored.tier],
+    };
   }
 
   public setSubscription(subscription: SubscriptionStatus): SubscriptionStatus {
-    this.store.set('subscription', subscription);
-    return subscription;
+    const normalized = {
+      ...subscription,
+      features: subscription.features ?? TIER_LIMITS[subscription.tier],
+    };
+    this.store.set('subscription', normalized);
+    return normalized;
   }
 
   public hasAcceptedEula(): boolean {

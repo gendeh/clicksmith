@@ -2,7 +2,7 @@ import Store from 'electron-store';
 import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
-import { Profile, ProfileExport, SubscriptionStatus } from '../types';
+import { Profile, ProfileExport, ProfileMetadata, SubscriptionStatus } from '../types';
 
 export interface DraftProfile {
   target_app: string;
@@ -41,7 +41,26 @@ export class ProfileStore {
     }
 
     if (existing) {
-      const updated = { ...existing, ...profile, metadata: profile.metadata ?? existing.metadata };
+      const createdAt = existing.metadata?.created_at ?? profile.metadata?.created_at ?? profile.created_at;
+      const mergedCustom = {
+        ...(existing.metadata?.custom ?? {}),
+        ...(profile.metadata?.custom ?? {}),
+      };
+      const updatedMeta: ProfileMetadata = {
+        created_at: createdAt,
+        updated_at: new Date().toISOString(),
+        version: profile.metadata?.version ?? existing.metadata?.version ?? profile.version,
+        total_duration_ms:
+          profile.metadata?.total_duration_ms ?? existing.metadata?.total_duration_ms ?? 0,
+        event_count: profile.metadata?.event_count ?? profile.events.length,
+        override_count:
+          profile.metadata?.override_count ??
+          existing.metadata?.override_count ??
+          profile.events.filter(event => event.human_override).length,
+        tags: profile.metadata?.tags ?? existing.metadata?.tags ?? [],
+        custom: Object.keys(mergedCustom).length > 0 ? mergedCustom : undefined,
+      };
+      const updated = { ...existing, ...profile, metadata: updatedMeta };
       const nextProfiles = profiles.map(item => (item.id === profile.id ? updated : item));
       this.store.set('profiles', nextProfiles);
       return updated;

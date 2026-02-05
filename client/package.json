@@ -77,7 +77,7 @@
       "installerHeaderIcon": "public/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "license": "LICENSE.txt"
+      "license": "../installer/eula.txt"
     },
     "files": [
       "dist/**/*",
@@ -88,6 +88,13 @@
       {
         "from": "native/",
         "to": "native/",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "../mods/",
+        "to": "mods/",
         "filter": [
           "**/*"
         ]

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "adapters": [
+    {
+      "id": "geode-geometry-dash",
+      "name": "Geode (Geometry Dash)",
+      "framework": "Geode",
+      "game": "Geometry Dash",
+      "description": "Optional mod framework for high-fidelity input timing.",
+      "platforms": ["win32", "darwin"],
+      "install": {
+        "instructionsPath": "docs/mods/geode.md",
+        "downloadUrl": "https://geode-sdk.org"
+      },
+      "detect": {
+        "darwin": [
+          "~/Library/Application Support/Geode",
+          "~/Library/Application Support/GeometryDash/Geode",
+          "~/Library/Application Support/Geometry Dash/Geode",
+          "~/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geode",
+          "~/Library/Application Support/Steam/steamapps/common/Geometry Dash/Geometry Dash.app/Contents/geode"
+        ],
+        "win32": [
+          "%APPDATA%\\Geode",
+          "%LOCALAPPDATA%\\Geode",
+          "%PROGRAMFILES(X86)%\\Steam\\steamapps\\common\\Geometry Dash\\Geode"
+        ]
+      },
+      "launch": {
+        "type": "uri",
+        "value": "steam://rungameid/322170"
+      },
+      "protocol": {
+        "type": "local-http",
+        "statusUrl": "http://127.0.0.1:27737/status",
+        "baseUrl": "http://127.0.0.1:27737"
+      }
+    }
+  ]
+}

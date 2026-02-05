@@ -196,6 +196,62 @@ export interface PlaybackConfig {
   speedMultiplier: number;
   /** Use relative coordinates when possible */
   useRelativeCoords: boolean;
+  /** Snap playback timing to a fixed Hz (0 disables snapping) */
+  snapToHz?: number;
+  /** Timing snap strategy */
+  snapMode?: 'nearest' | 'floor' | 'duration-lock';
+  /** Phase offset for snapped timing (ms) */
+  snapPhaseMs?: number;
+}
+
+// ============================================================================
+// Mod Adapter Types
+// ============================================================================
+
+export type ModProtocolType = 'local-http';
+
+export type ModSnapMode = 'nearest' | 'floor' | 'duration-lock';
+
+export interface ModAdapterProtocol {
+  type: ModProtocolType;
+  statusUrl?: string;
+  baseUrl?: string;
+}
+
+export interface ModAdapterLaunch {
+  type: 'uri' | 'appPath';
+  value: string;
+}
+
+export interface ModAdapterInstall {
+  instructionsPath?: string;
+  downloadUrl?: string;
+}
+
+export interface ModAdapterManifest {
+  id: string;
+  name: string;
+  description?: string;
+  framework: string;
+  game: string;
+  platforms?: NodeJS.Platform[];
+  install?: ModAdapterInstall;
+  detect?: Partial<Record<NodeJS.Platform, string[]>>;
+  launch?: ModAdapterLaunch;
+  protocol?: ModAdapterProtocol;
+}
+
+export interface ModRegistry {
+  version: number;
+  adapters: ModAdapterManifest[];
+}
+
+export interface ModAdapterStatus {
+  adapter: ModAdapterManifest;
+  installed: boolean;
+  detectedPath?: string;
+  connection: 'unknown' | 'connected' | 'unreachable';
+  lastError?: string;
 }
 
 /**
@@ -447,6 +503,10 @@ export interface UserPreferences {
   defaultPlaybackConfig: Partial<PlaybackConfig>;
   /** Hotkey bindings */
   hotkeys: HotkeyBindings;
+  /** Prefer mod adapter recording/playback when available */
+  useModAdapter: boolean;
+  /** Auto takeover on user input during playback */
+  autoTakeoverOnInput: boolean;
   /** Show EULA reminder */
   showEulaReminder: boolean;
   /** Telemetry opt-in */
@@ -496,6 +556,7 @@ export const IPC_CHANNELS = {
   PLAYBACK_PAUSE: 'playback:pause',
   PLAYBACK_TAKEOVER: 'playback:takeover',
   PLAYBACK_STATUS: 'playback:status',
+  PLAYBACK_SELECT: 'playback:select',
   
   // Profiles
   PROFILE_LIST: 'profile:list',
@@ -533,6 +594,13 @@ export const IPC_CHANNELS = {
   OVERLAY_SHOW: 'overlay:show',
   OVERLAY_HIDE: 'overlay:hide',
   OVERLAY_TOGGLE: 'overlay:toggle',
+
+  // Mods
+  MODS_LIST: 'mods:list',
+  MODS_PROBE: 'mods:probe',
+  MODS_LAUNCH: 'mods:launch',
+  MODS_OPEN_DOC: 'mods:open-doc',
+  MODS_OPEN_URL: 'mods:open-url',
   
   // App
   APP_QUIT: 'app:quit',
