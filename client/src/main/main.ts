@@ -632,12 +632,6 @@ function armAutoTakeoverHook() {
     const button = mouseEvent.button ?? 1;
     if (button !== 1) return;
 
-    if (playbackViaMod) {
-      autoTakeoverHookTriggered = true;
-      void startModTakeoverImmediate();
-      return;
-    }
-
     if (!playbackEngine.playing) return;
     if (typeof mouseEvent.x !== 'number' || typeof mouseEvent.y !== 'number') return;
     autoTakeoverHookTriggered = true;
@@ -675,10 +669,14 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
   let events = rawEvents;
   const takeoverStartMs = response.start_ms ?? null;
   const baseProfile = pendingTakeoverProfile;
-  const normalizedTakeoverStartMs =
+  let normalizedTakeoverStartMs =
     baseProfile && typeof takeoverStartMs === 'number'
       ? takeoverStartMs + lastPlaybackLeadInMs
       : null;
+  if (baseProfile && typeof normalizedTakeoverStartMs === 'number') {
+    const maxBaseMs = computeProfileDuration(baseProfile.events);
+    normalizedTakeoverStartMs = Math.max(0, Math.min(normalizedTakeoverStartMs, maxBaseMs));
+  }
   const takeoverBaseId = baseProfile?.id ?? null;
   pendingTakeoverStartMs = typeof normalizedTakeoverStartMs === 'number' ? normalizedTakeoverStartMs : null;
   if (baseProfile && typeof normalizedTakeoverStartMs === 'number' && rawEvents.length > 0) {
@@ -779,7 +777,6 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
       success: false,
       error: error?.message ?? 'takeover_arm_failed',
     }));
-    armAutoTakeoverHook();
     if (!takeoverResult.success) {
       broadcastStatus(
         IPC_CHANNELS.PLAYBACK_STATUS,
@@ -787,7 +784,9 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
       );
     }
   } else {
-    disarmAutoTakeoverHook();
+    pendingTakeoverProfile = null;
+    pendingTakeoverStartMs = null;
+    modTakeoverArmed = false;
   }
   startModStatePolling(baseUrl, modEvents.length);
   scheduleModPlaybackAutoIdle(modEvents);
