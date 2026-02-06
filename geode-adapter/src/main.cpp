@@ -76,6 +76,9 @@ double gRecordStartMs = 0.0;
 double gReplayStartMs = 0.0;
 std::size_t gReplayIndex = 0;
 
+void startRecording();
+void stopReplay();
+
 void closeSocket(SocketHandle handle) {
 #ifdef _WIN32
   if (handle != kInvalidSocket) {
@@ -150,13 +153,18 @@ std::string buildStatusPayload() {
   payload["id"] = "geode-geometry-dash";
   payload["name"] = "Clicksmith Geode Adapter";
   payload["game"] = "Geometry Dash";
-  payload["version"] = "0.1.0";
+  payload["version"] = "0.2.0";
   auto caps = matjson::Value::array();
   caps.push("status");
   caps.push("record");
   caps.push("replay");
   payload["capabilities"] = caps;
   payload["tick_hz"] = 240;
+  payload["record_active"] = gRecordActive.load();
+  payload["record_armed"] = gRecordArmed.load();
+  payload["replay_active"] = gReplayActive.load();
+  payload["replay_requested"] = gReplayRequested.load();
+  payload["takeover_armed"] = gTakeoverArmed.load();
   return payload.dump(matjson::NO_INDENTATION);
 }
 
@@ -364,6 +372,13 @@ HttpResponse handleRecordStart() {
     payload["state"] = "recording";
     return {200, payload.dump(matjson::NO_INDENTATION)};
   }
+  if (gInLevel && !gReplayActive.load()) {
+    startRecording();
+    auto payload = matjson::Value::object();
+    payload["ok"] = true;
+    payload["state"] = "recording";
+    return {200, payload.dump(matjson::NO_INDENTATION)};
+  }
   gRecordArmed.store(true);
   gTakeoverArmed.store(false);
   gRecordStopRequested.store(false);
@@ -471,13 +486,37 @@ HttpResponse handleReplayStart(const HttpRequest& request) {
   return {200, payload.dump(matjson::NO_INDENTATION)};
 }
 
-HttpResponse handleReplayTakeover() {
+HttpResponse handleReplayTakeover(const HttpRequest& request) {
+  bool immediate = false;
+  if (!request.body.empty()) {
+    auto parsed = matjson::Value::parse(request.body);
+    if (parsed.isOk()) {
+      auto nowRes = parsed.unwrap()["immediate"].asBool();
+      if (nowRes.isOk()) {
+        immediate = nowRes.unwrap();
+      }
+    }
+  }
+
   if (!gInLevel) {
     return {400, buildErrorPayload("not_in_level")};
   }
   if (!gReplayActive.load() && !gReplayRequested.load()) {
     return {400, buildErrorPayload("not_replaying")};
   }
+
+  if (immediate) {
+    gReplayRequested.store(false);
+    gReplayStopRequested.store(false);
+    stopReplay();
+    startRecording();
+    auto payload = matjson::Value::object();
+    payload["ok"] = true;
+    payload["state"] = "recording";
+    payload["immediate"] = true;
+    return {200, payload.dump(matjson::NO_INDENTATION)};
+  }
+
   gTakeoverArmed.store(true);
   gRecordArmed.store(true);
   gRecordStopRequested.store(false);
@@ -511,7 +550,7 @@ HttpResponse routeRequest(const HttpRequest& request) {
     return handleReplayStart(request);
   }
   if (request.method == "POST" && request.path == "/replay/takeover") {
-    return handleReplayTakeover();
+    return handleReplayTakeover(request);
   }
   if (request.method == "POST" && request.path == "/replay/stop") {
     return handleReplayStop();
@@ -655,9 +694,6 @@ void recordEvent(PlayerButton button, bool down, bool player2) {
   gRecordingEvents.push_back(event);
 }
 
-void startRecording();
-void stopReplay();
-
 void startRecordingIfArmed(bool replayInput) {
   if (gRecordActive.load() || !gInLevel) return;
   const bool takeoverArmed = gTakeoverArmed.load();
@@ -688,6 +724,8 @@ void dispatchReplayEvent(const MacroEvent& event) {
 void startRecording() {
   gRecordArmed.store(false);
   gTakeoverArmed.store(false);
+  gButtonDown[0][0] = gButtonDown[0][1] = gButtonDown[0][2] = false;
+  gButtonDown[1][0] = gButtonDown[1][1] = gButtonDown[1][2] = false;
   std::lock_guard<std::mutex> lock(gMacroMutex);
   gRecordingEvents.clear();
   gRecordStartMs = gGameTimeMs;
