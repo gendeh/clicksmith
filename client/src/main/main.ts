@@ -39,6 +39,7 @@ let lastPlaybackProfile: Profile | null = null;
 let lastPlaybackTarget: string | null = null;
 let lastPlaybackLeadInMs = 0;
 let lastDraftProfile: Profile | null = null;
+let draftQuickReplayPending = false;
 let recordingViaMod = false;
 let playbackViaMod = false;
 let activeModBaseUrl: string | null = null;
@@ -47,6 +48,9 @@ let pendingTakeoverStartMs: number | null = null;
 let modTakeoverArmed = false;
 let modPlaybackAutoIdleTimer: NodeJS.Timeout | null = null;
 let modStatePollTimer: NodeJS.Timeout | null = null;
+let modAutoFinalizeRecording = false;
+let modTakeoverArmInFlight = false;
+let modTakeoverLastArmAttemptMs = 0;
 let autoTakeoverHookActive = false;
 let autoTakeoverHookTriggered = false;
 const autoTakeoverHook: InputHook = createDefaultInputHook();
@@ -253,11 +257,25 @@ function clearModStatePollTimer() {
   modStatePollTimer = null;
 }
 
+function clearStaleModRecordingState() {
+  recordingViaMod = false;
+  modTakeoverArmed = false;
+  modAutoFinalizeRecording = false;
+  modTakeoverArmInFlight = false;
+  modTakeoverLastArmAttemptMs = 0;
+  activeModBaseUrl = null;
+  broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle' });
+}
+
 function settleModPlaybackIdle(totalEvents = 0) {
   clearModPlaybackAutoIdleTimer();
   clearModStatePollTimer();
   playbackViaMod = false;
+  recordingViaMod = false;
   modTakeoverArmed = false;
+  modAutoFinalizeRecording = false;
+  modTakeoverArmInFlight = false;
+  modTakeoverLastArmAttemptMs = 0;
   activeModBaseUrl = null;
   pendingTakeoverProfile = null;
   pendingTakeoverStartMs = null;
@@ -280,13 +298,49 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
   clearModStatePollTimer();
   modStatePollTimer = setInterval(() => {
     void (async () => {
-      if (!playbackViaMod && !recordingViaMod && !modTakeoverArmed) {
-        clearModStatePollTimer();
+      const status = await modGetStatus(baseUrl);
+      if (!status?.ok) return;
+
+      if (recordingViaMod) {
+        if (status.record_active) {
+          broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
+        } else if (status.record_armed) {
+          broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'armed' });
+        }
+      }
+      modTakeoverArmed = Boolean(status.takeover_armed);
+
+      const finalizeFromCompletion = !!status.record_complete;
+      const finalizeFromIdle = recordingViaMod && !status.record_active && !status.record_armed;
+
+      if (finalizeFromCompletion || finalizeFromIdle) {
+        if (modAutoFinalizeRecording) return;
+        modAutoFinalizeRecording = true;
+        try {
+          if (!recordingViaMod) {
+            recordingViaMod = true;
+          }
+          await stopModRecordingAndDraft();
+        } finally {
+          modAutoFinalizeRecording = false;
+        }
         return;
       }
 
-      const status = await modGetStatus(baseUrl);
-      if (!status?.ok) return;
+      const adapterBusy = Boolean(
+        status.record_active ||
+          status.record_armed ||
+          status.record_complete ||
+          status.replay_active ||
+          status.replay_armed ||
+          status.replay_requested ||
+          status.takeover_armed
+      );
+
+      if (!playbackViaMod && !recordingViaMod && !modTakeoverArmed && !pendingTakeoverProfile && !adapterBusy) {
+        clearModStatePollTimer();
+        return;
+      }
 
       if (playbackViaMod && status.record_active && !status.replay_active) {
         clearModPlaybackAutoIdleTimer();
@@ -299,7 +353,30 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
         return;
       }
 
-      if (playbackViaMod && !status.replay_active && !status.replay_requested && !status.record_active) {
+      if (
+        playbackViaMod &&
+        shouldAutoTakeover() &&
+        !status.takeover_armed &&
+        (status.replay_active || status.replay_armed || status.replay_requested) &&
+        !!lastPlaybackProfile
+      ) {
+        const now = Date.now();
+        if (!modTakeoverArmInFlight && now - modTakeoverLastArmAttemptMs >= 400) {
+          modTakeoverArmInFlight = true;
+          modTakeoverLastArmAttemptMs = now;
+          void armModTakeover(lastPlaybackProfile).finally(() => {
+            modTakeoverArmInFlight = false;
+          });
+        }
+      }
+
+      if (
+        playbackViaMod &&
+        !status.replay_active &&
+        !status.replay_requested &&
+        !status.replay_armed &&
+        !status.record_active
+      ) {
         settleModPlaybackIdle(totalEvents);
       }
     })();
@@ -360,7 +437,9 @@ type ModStatusResponse = {
   capabilities?: string[];
   record_active?: boolean;
   record_armed?: boolean;
+  record_complete?: boolean;
   replay_active?: boolean;
+  replay_armed?: boolean;
   replay_requested?: boolean;
   takeover_armed?: boolean;
   error?: string;
@@ -398,6 +477,22 @@ async function modGetStatus(baseUrl: string): Promise<ModStatusResponse | null> 
   } catch {
     return null;
   }
+}
+
+function isModRecordingLifecycleActive(status: ModStatusResponse): boolean {
+  return Boolean(status.record_active || status.record_armed || status.record_complete || status.takeover_armed);
+}
+
+async function resolveModRecordingState(): Promise<{ baseUrl: string; status: ModStatusResponse } | null> {
+  const baseUrl = activeModBaseUrl ?? (await resolveModBaseUrl());
+  if (!baseUrl) return null;
+  const status = await modGetStatus(baseUrl);
+  if (!status?.ok) return null;
+  return { baseUrl, status };
+}
+
+async function isModAdapterReachable(): Promise<boolean> {
+  return (await resolveModBaseUrl()) !== null;
 }
 
 function modButtonToKey(button: string): string {
@@ -500,12 +595,36 @@ function convertRecordedEventsToModEvents(events: RecordedEvent[]): ModMacroEven
   const rawEvents: ModMacroEvent[] = [];
   events.forEach(event => {
     const metadata = event.metadata as Record<string, unknown> | undefined;
-    const button =
-      (typeof metadata?.button === 'string' && metadata.button) ||
-      (event.key === 'left' ? 'left' : event.key === 'right' ? 'right' : 'jump');
-    const player2 = Boolean(metadata?.player2);
+    if (metadata?.takeover_marker === true) {
+      return;
+    }
+
     const source = typeof metadata?.source === 'string' ? metadata.source : '';
     const action = typeof metadata?.action === 'string' ? metadata.action : '';
+    let button: 'jump' | 'left' | 'right' | null = null;
+
+    if (typeof metadata?.button === 'string') {
+      const rawButton = metadata.button.toLowerCase();
+      if (rawButton === 'left' || rawButton === 'right' || rawButton === 'jump' || rawButton === 'space') {
+        button = rawButton === 'space' ? 'jump' : (rawButton as 'jump' | 'left' | 'right');
+      }
+    } else if (event.type === 'mouse') {
+      // For non-Geode recordings, only left mouse button maps to jump.
+      if ((event.btn ?? 'left') === 'left') {
+        button = 'jump';
+      }
+    } else if (event.type === 'keyboard') {
+      const key = (event.key ?? '').toLowerCase();
+      if (key === 'left') button = 'left';
+      if (key === 'right') button = 'right';
+      if (key === 'space') button = 'jump';
+    }
+
+    if (!button) {
+      return;
+    }
+
+    const player2 = Boolean(metadata?.player2);
     const durationMs = Math.max(0, event.duration_ms ?? 0);
     const releaseAt =
       typeof metadata?.release_t_ms === 'number' && Number.isFinite(metadata.release_t_ms)
@@ -613,6 +732,11 @@ function shouldAutoTakeover(): boolean {
   return preferences.autoTakeoverOnInput ?? true;
 }
 
+function isGeometryDashTarget(target: string | null | undefined): boolean {
+  if (!target) return false;
+  return target.toLowerCase().includes('geometry dash');
+}
+
 function disarmAutoTakeoverHook() {
   if (!autoTakeoverHookActive) return;
   autoTakeoverHookActive = false;
@@ -649,6 +773,7 @@ async function startModRecording(target: string): Promise<{ success: boolean; er
   pendingTakeoverProfile = null;
   pendingTakeoverStartMs = null;
   modTakeoverArmed = false;
+  modAutoFinalizeRecording = false;
   playbackViaMod = false;
   const response = await modRequest<ModStatusResponse>(baseUrl, '/record/start', { target });
   if (!response.ok) {
@@ -656,12 +781,26 @@ async function startModRecording(target: string): Promise<{ success: boolean; er
   }
   recordingViaMod = true;
   activeModBaseUrl = baseUrl;
+  // Keep adapter status polling active during plain recording as well so
+  // auto-stop on death/complete is always finalized into a draft.
+  startModStatePolling(baseUrl, 0);
+  broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'armed' });
   return { success: true };
 }
 
 async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?: any; error?: string }> {
   if (!activeModBaseUrl) return { success: false, error: 'mod_unreachable' };
-  const response = await modRequest<ModRecordResponse>(activeModBaseUrl, '/record/stop');
+  let response: ModRecordResponse;
+  try {
+    response = await modRequest<ModRecordResponse>(activeModBaseUrl, '/record/stop');
+  } catch (error: any) {
+    const message = error?.message ?? '';
+    if (message.includes('not_recording')) {
+      clearStaleModRecordingState();
+      return { success: false, error: 'not_recording' };
+    }
+    throw error;
+  }
   if (!response.ok) {
     return { success: false, error: response.error ?? 'record_stop_failed' };
   }
@@ -687,6 +826,19 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
   modTakeoverArmed = false;
   playbackViaMod = false;
   clearModStatePollTimer();
+
+  // If recording was only armed and never actually captured inputs, treat
+  // this as a cancel/no-op instead of creating an empty draft.
+  if (events.length === 0 && !baseProfile) {
+    currentRecordingTarget = null;
+    recordingViaMod = false;
+    activeModBaseUrl = null;
+    lastDraftProfile = null;
+    draftQuickReplayPending = false;
+    broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle' });
+    return { success: true, profile: { events: [], duration: 0 } };
+  }
+
   const createdAt = new Date().toISOString();
   const totalDurationMs = events.length > 0 ? computeProfileDuration(events) : response.duration_ms ?? 0;
   profileStore.saveDraft({
@@ -716,6 +868,7 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
   recordingViaMod = false;
   activeModBaseUrl = null;
   lastDraftProfile = buildDraftPlaybackProfile();
+  draftQuickReplayPending = true;
   broadcastStatus(IPC_CHANNELS.RUN_COMPLETE, {
     source: 'recording',
     draft: profileStore.getDraft(),
@@ -747,6 +900,7 @@ async function armModTakeover(profile: Profile): Promise<{ success: boolean; err
   activeModBaseUrl = baseUrl;
   currentRecordingTarget = profile.target_app;
   modTakeoverArmed = true;
+  modTakeoverLastArmAttemptMs = Date.now();
   return { success: true };
 }
 
@@ -758,10 +912,13 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
   }
   clearModPlaybackAutoIdleTimer();
   clearModStatePollTimer();
-  const runtime = buildRuntimePlaybackProfile(profile);
-  lastPlaybackLeadInMs = runtime.leadInMs;
+  // Adapter replay is attempt-boundary anchored, so preserve absolute
+  // level-start timing from the saved profile and do not trim lead-in.
+  lastPlaybackLeadInMs = 0;
   pendingTakeoverProfile = null;
-  const modEvents = convertRecordedEventsToModEvents(runtime.profile.events);
+  // Always clear any stale replay arm/state before arming a fresh replay.
+  await modRequest<ModStatusResponse>(baseUrl, '/replay/stop').catch(() => null);
+  const modEvents = convertRecordedEventsToModEvents(profile.events);
   const response = await modRequest<ModStatusResponse>(baseUrl, '/replay/start', { events: modEvents });
   if (!response.ok) {
     const errorText = response.error ?? 'replay_start_failed';
@@ -771,7 +928,10 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
   playbackViaMod = true;
   activeModBaseUrl = baseUrl;
   modTakeoverArmed = false;
+  modTakeoverArmInFlight = false;
+  modTakeoverLastArmAttemptMs = 0;
   recordingViaMod = false;
+  modAutoFinalizeRecording = false;
   if (shouldAutoTakeover()) {
     const takeoverResult = await armModTakeover(profile).catch((error: any) => ({
       success: false,
@@ -789,7 +949,7 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
     modTakeoverArmed = false;
   }
   startModStatePolling(baseUrl, modEvents.length);
-  scheduleModPlaybackAutoIdle(modEvents);
+  clearModPlaybackAutoIdleTimer();
   broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('playing', modEvents.length));
   return { success: true, eventCount: modEvents.length };
 }
@@ -825,12 +985,14 @@ async function startModTakeoverImmediate(): Promise<{ success: boolean; error?: 
   }
 
   clearModPlaybackAutoIdleTimer();
-  clearModStatePollTimer();
   playbackViaMod = false;
   recordingViaMod = true;
   modTakeoverArmed = true;
   activeModBaseUrl = baseUrl;
   disarmAutoTakeoverHook();
+  // Keep polling alive during takeover recording so death/complete finalizes
+  // into a draft and the save/discard modal always appears.
+  startModStatePolling(baseUrl, lastPlaybackProfile.events.length);
   broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', lastPlaybackProfile.events.length));
   broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
   return { success: true };
@@ -891,6 +1053,7 @@ async function stopRecordingAndDraft() {
       },
     });
     lastDraftProfile = buildDraftPlaybackProfile();
+    draftQuickReplayPending = true;
     currentRecordingTarget = null;
     broadcastStatus(IPC_CHANNELS.RUN_COMPLETE, {
       source: 'recording',
@@ -912,17 +1075,17 @@ function setupIpcHandlers() {
     const normalized = buildRecordingConfig(config);
     currentRecordingTarget = normalized.target;
     const preferences = settingsStore.getPreferences();
+    const adapterReachable = await isModAdapterReachable();
+    const useModAdapterForThisRun = preferences.useModAdapter || adapterReachable;
     recordingEngine.setTakeoverActive(false);
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
 
-    if (preferences.useModAdapter) {
+    if (useModAdapterForThisRun) {
       try {
         const result = await startModRecording(normalized.target);
-        if (result.success) {
-          broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
-        }
-        return result;
+        if (result.success) return result;
+        return { success: false, error: result.error ?? 'record_start_failed' };
       } catch (error: any) {
         return { success: false, error: error?.message ?? 'record_start_failed' };
       }
@@ -936,14 +1099,26 @@ function setupIpcHandlers() {
   });
 
   ipcMain.handle(IPC_CHANNELS.RECORDING_STOP, async () => {
-    if ((recordingViaMod || modTakeoverArmed) && activeModBaseUrl) {
+    const modState = await resolveModRecordingState();
+    const shouldStopMod =
+      recordingViaMod || modTakeoverArmed || (modState ? isModRecordingLifecycleActive(modState.status) : false);
+    if (shouldStopMod) {
+      if (!modState) {
+        clearStaleModRecordingState();
+        return { success: false, error: 'mod_unreachable' };
+      }
+      activeModBaseUrl = modState.baseUrl;
       try {
         return await stopModRecordingAndDraft();
       } catch (error: any) {
-        recordingViaMod = false;
-        activeModBaseUrl = null;
+        clearStaleModRecordingState();
         return { success: false, error: error?.message ?? 'record_stop_failed' };
       }
+    }
+
+    if (recordingViaMod || modTakeoverArmed) {
+      clearStaleModRecordingState();
+      return { success: false, error: 'not_recording' };
     }
 
     return stopRecordingAndDraft();
@@ -955,6 +1130,7 @@ function setupIpcHandlers() {
     if (!profile) {
       return { success: false, error: 'Profile not found' };
     }
+    draftQuickReplayPending = false;
     lastProfileId = profile.id;
     lastPlaybackProfile = profile;
     lastPlaybackTarget = playbackConfig.target;
@@ -962,9 +1138,16 @@ function setupIpcHandlers() {
     pendingTakeoverStartMs = null;
     lastPlaybackLeadInMs = 0;
     const preferences = settingsStore.getPreferences();
-    if (preferences.useModAdapter) {
+    const adapterReachable = await isModAdapterReachable();
+    const useModAdapterForThisRun =
+      preferences.useModAdapter || adapterReachable || isGeometryDashTarget(profile.target_app);
+    if (useModAdapterForThisRun) {
       try {
-        return await startModPlayback(profile);
+        const modResult = await startModPlayback(profile);
+        if (modResult.success) {
+          return modResult;
+        }
+        return { success: false, error: modResult.error ?? 'replay_start_failed' };
       } catch (error: any) {
         return { success: false, error: error?.message ?? 'replay_start_failed' };
       }
@@ -1003,6 +1186,7 @@ function setupIpcHandlers() {
     if (!profile) {
       return { success: false, error: 'Profile not found' };
     }
+    draftQuickReplayPending = false;
     lastProfileId = profile.id;
     lastPlaybackProfile = profile;
     return { success: true };
@@ -1051,6 +1235,7 @@ function setupIpcHandlers() {
       const saved = profileStore.save(draftProfile, subscription);
       profileStore.discardDraft();
       lastDraftProfile = null;
+      draftQuickReplayPending = false;
       lastProfileId = saved.id;
       broadcastStatus('profile:saved', saved);
       const preferences = settingsStore.getPreferences();
@@ -1067,6 +1252,7 @@ function setupIpcHandlers() {
   ipcMain.handle(IPC_CHANNELS.PROFILE_DISCARD_DRAFT, async () => {
     profileStore.discardDraft();
     lastDraftProfile = null;
+    draftQuickReplayPending = false;
     return { success: true };
   });
 
@@ -1183,8 +1369,18 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
 
   globalShortcut.register(hotkeys.toggleRecording, async () => {
     const preferences = settingsStore.getPreferences();
-    if (recordingViaMod || modTakeoverArmed) {
-      await stopModRecordingAndDraft().catch(() => null);
+    const modState = await resolveModRecordingState();
+    const shouldStopMod =
+      recordingViaMod || modTakeoverArmed || (modState ? isModRecordingLifecycleActive(modState.status) : false);
+    if (shouldStopMod) {
+      if (!modState) {
+        clearStaleModRecordingState();
+        return;
+      }
+      activeModBaseUrl = modState.baseUrl;
+      await stopModRecordingAndDraft().catch(() => {
+        clearStaleModRecordingState();
+      });
       return;
     }
 
@@ -1196,11 +1392,12 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       return;
     }
 
-    if (preferences.useModAdapter) {
+    const adapterReachable = await isModAdapterReachable();
+    const useModAdapterForThisRun = preferences.useModAdapter || adapterReachable;
+    if (useModAdapterForThisRun) {
       const result = await startModRecording('screen').catch(() => null);
-      if (result?.success) {
-        broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
-      }
+      if (result?.success) return;
+      broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle', error: result?.error ?? 'record_start_failed' });
       return;
     }
 
@@ -1213,9 +1410,19 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
 
   globalShortcut.register(hotkeys.togglePlayback, async () => {
     const preferences = settingsStore.getPreferences();
+    const adapterReachable = await isModAdapterReachable();
     if (playbackViaMod && activeModBaseUrl) {
-      await stopModPlayback().catch(() => null);
-      return;
+      const status = await modGetStatus(activeModBaseUrl);
+      const adapterReplayBusy = Boolean(
+        status?.replay_active || status?.replay_armed || status?.replay_requested || status?.record_active
+      );
+      if (adapterReplayBusy) {
+        await stopModPlayback().catch(() => null);
+        return;
+      }
+      // Renderer/UI can briefly lag behind adapter state; clear stale local
+      // flags and continue as a start request in this same key press.
+      settleModPlaybackIdle(lastPlaybackProfile?.events.length ?? 0);
     }
     if (playbackEngine.playing) {
       disarmAutoTakeoverHook();
@@ -1223,12 +1430,25 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       await playbackEngine.stop();
       return;
     }
-    const draftProfile = lastDraftProfile ?? buildDraftPlaybackProfile();
+    const draftProfile = draftQuickReplayPending ? lastDraftProfile ?? buildDraftPlaybackProfile() : null;
     if (draftProfile) {
+      draftQuickReplayPending = false;
       lastPlaybackProfile = draftProfile;
       lastPlaybackTarget = draftProfile.target_app;
-      if (preferences.useModAdapter) {
-        await startModPlayback(draftProfile).catch(() => null);
+      const useModAdapterForThisRun =
+        preferences.useModAdapter || adapterReachable || isGeometryDashTarget(draftProfile.target_app);
+      if (useModAdapterForThisRun) {
+        const modResult = await startModPlayback(draftProfile).catch((error: any) => ({
+          success: false,
+          error: error?.message ?? 'replay_start_failed',
+        }));
+        if (modResult?.success) {
+          return;
+        }
+        broadcastStatus(
+          IPC_CHANNELS.PLAYBACK_STATUS,
+          buildModPlaybackStatus('idle', 0, modResult?.error ?? 'replay_start_failed')
+        );
         return;
       }
       const runtime = buildRuntimePlaybackProfile(draftProfile);
@@ -1254,8 +1474,20 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     const profile = profileStore.get(profileId);
     if (!profile) return;
     lastPlaybackProfile = profile;
-    if (preferences.useModAdapter) {
-      await startModPlayback(profile).catch(() => null);
+    const useModAdapterForThisRun =
+      preferences.useModAdapter || adapterReachable || isGeometryDashTarget(profile.target_app);
+    if (useModAdapterForThisRun) {
+      const modResult = await startModPlayback(profile).catch((error: any) => ({
+        success: false,
+        error: error?.message ?? 'replay_start_failed',
+      }));
+      if (modResult?.success) {
+        return;
+      }
+      broadcastStatus(
+        IPC_CHANNELS.PLAYBACK_STATUS,
+        buildModPlaybackStatus('idle', 0, modResult?.error ?? 'replay_start_failed')
+      );
       return;
     }
 
@@ -1296,8 +1528,21 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     if (!profile) return;
     lastPlaybackProfile = profile;
     const preferences = settingsStore.getPreferences();
-    if (preferences.useModAdapter) {
-      await startModPlayback(profile).catch(() => null);
+    const adapterReachable = await isModAdapterReachable();
+    const useModAdapterForThisRun =
+      preferences.useModAdapter || adapterReachable || isGeometryDashTarget(profile.target_app);
+    if (useModAdapterForThisRun) {
+      const modResult = await startModPlayback(profile).catch((error: any) => ({
+        success: false,
+        error: error?.message ?? 'replay_start_failed',
+      }));
+      if (modResult?.success) {
+        return;
+      }
+      broadcastStatus(
+        IPC_CHANNELS.PLAYBACK_STATUS,
+        buildModPlaybackStatus('idle', 0, modResult?.error ?? 'replay_start_failed')
+      );
       return;
     }
     lastPlaybackTarget = 'screen';

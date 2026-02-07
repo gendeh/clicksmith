@@ -31,7 +31,7 @@ const AUTO_TUNE_DEFAULTS: AutoTuneSettings = {
 
 const App: React.FC = () => {
   const isOverlay = window.location.hash.includes('overlay');
-  const [recordingState, setRecordingState] = useState<'idle' | 'recording' | 'paused'>('idle');
+  const [recordingState, setRecordingState] = useState<'idle' | 'armed' | 'recording' | 'paused'>('idle');
   const [playbackStatus, setPlaybackStatus] = useState<PlaybackStatus | null>(null);
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [targets, setTargets] = useState<WindowInfo[]>([]);
@@ -63,6 +63,10 @@ const App: React.FC = () => {
     () => profiles.find(profile => profile.id === selectedProfileId) ?? null,
     [profiles, selectedProfileId]
   );
+  const isRecordingActive = recordingState === 'recording';
+  const isRecordingArmed = recordingState === 'armed';
+  const isRecordingBusy = isRecordingActive || isRecordingArmed || recordingState === 'paused';
+  const recordingOverlayLabel = isRecordingActive ? 'LIVE' : isRecordingArmed ? 'ARMED' : 'REC';
 
   useEffect(() => {
     if (!selectedProfileId && profiles.length > 0) {
@@ -305,14 +309,14 @@ const App: React.FC = () => {
           onMouseLeave={() => ipcRenderer.send('overlay:set-interactive', false)}
         >
           <div className="overlay-status">
-            <span className={`dot ${recordingState === 'recording' ? 'dot-rec-live' : ''}`} />
-            <span className="overlay-label">REC</span>
+            <span className={`dot ${isRecordingActive ? 'dot-rec-live' : isRecordingArmed ? 'dot-rec-armed' : ''}`} />
+            <span className="overlay-label">{recordingOverlayLabel}</span>
             <span className={`dot ${playbackStatus?.state === 'playing' ? 'dot-play-live' : ''}`} />
             <span className="overlay-label">PLAY</span>
           </div>
           <div className="overlay-actions">
-            <button className="btn btn-overlay" onClick={recordingState === 'recording' ? stopRecording : startRecording}>
-              {recordingState === 'recording' ? 'Stop' : 'Rec'} F9
+            <button className="btn btn-overlay" onClick={isRecordingBusy ? stopRecording : startRecording}>
+              {isRecordingBusy ? 'Stop' : 'Rec'} F9
             </button>
             <button className="btn btn-overlay" onClick={playbackStatus?.state === 'playing' ? stopPlayback : startPlayback}>
               {playbackStatus?.state === 'playing' ? 'Stop' : 'Play'} F10
@@ -399,8 +403,8 @@ const App: React.FC = () => {
       <header className="topbar">
         <div className="logo">Clicksmith</div>
         <div className="topbar-actions">
-          <div className={`chip ${recordingState === 'recording' ? 'chip-live' : ''}`}>
-            REC · {recordingState === 'recording' ? 'Live' : 'Idle'}
+          <div className={`chip ${isRecordingBusy ? 'chip-live' : ''}`}>
+            REC · {isRecordingActive ? 'Live' : isRecordingArmed ? 'Armed' : 'Idle'}
           </div>
           <div className={`chip ${playbackStatus?.state === 'playing' ? 'chip-live' : ''}`}>
             PLAY · {playbackStatus?.state === 'playing' ? 'Running' : 'Ready'}
@@ -430,9 +434,9 @@ const App: React.FC = () => {
           <div className="control-stack">
             <button
               className="btn btn-primary"
-              onClick={recordingState === 'recording' ? stopRecording : startRecording}
+              onClick={isRecordingBusy ? stopRecording : startRecording}
             >
-              {recordingState === 'recording' ? 'Stop Recording' : 'Start Recording'}
+              {isRecordingBusy ? 'Stop Recording' : 'Start Recording'}
             </button>
             <button
               className="btn btn-ghost"

@@ -113,7 +113,7 @@ This is a running log of the main bugs we hit during MVP development, how they s
   - Captured takeover trigger edge explicitly by seeding per-button state.
   - Returned/used `snapshot.start_ms` consistently.
   - Clamped takeover anchor in adapter to replay range and in client to base profile duration before merge.
-
+ 
 ## 22) Git push blocked by large backup artifact
 - Symptom: GitHub pre-receive hook rejected push (>100MB file).
 - Root cause: Game backup artifacts were tracked in repo history/worktree.

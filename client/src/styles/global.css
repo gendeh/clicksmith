@@ -342,6 +342,11 @@ body::before {
   box-shadow: 0 0 10px rgba(255, 107, 107, 0.65);
 }
 
+.dot-rec-armed {
+  background: #ffd166;
+  box-shadow: 0 0 10px rgba(255, 209, 102, 0.65);
+}
+
 .dot-play-live {
   background: #5bf5bf;
   box-shadow: 0 0 10px rgba(91, 245, 191, 0.6);
