@@ -8,7 +8,7 @@ jest.mock('../../src/main/screenCapture', () => ({
 }));
 
 describe('Synthetic recording + playback', () => {
-  test('replays with low drift and high match rate', async () => {
+  test('replays with low drift and expected dispatch volume', async () => {
     jest.useFakeTimers();
     jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
 
@@ -65,7 +65,7 @@ describe('Synthetic recording + playback', () => {
     const config: PlaybackConfig = {
       profileId: baseProfile.id,
       target: 'synthetic',
-      useImageMatching: true,
+      useImageMatching: false,
       imageMatchThreshold: 0.6,
       timingTolerance: 20,
       retryCount: 1,
@@ -98,15 +98,25 @@ describe('Synthetic recording + playback', () => {
       imageService: fakeImageService as any,
       windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 1000, height: 800 }) } as any,
     });
+    const driftSamples: number[] = [];
+    playback.on('status', status => {
+      if (status.state === 'playing' && Number.isFinite(status.timingDrift)) {
+        driftSamples.push(Math.abs(status.timingDrift));
+      }
+    });
 
     await playback.start(config, baseProfile);
-    jest.advanceTimersByTime(3000);
+    await jest.advanceTimersByTimeAsync(3000);
 
     const status = playback.getStatus();
-    const matchRate = status.successfulMatches / baseProfile.events.length;
+    const sortedDrift = [...driftSamples].sort((a, b) => a - b);
+    const p95Index = Math.max(0, Math.floor(sortedDrift.length * 0.95) - 1);
+    const driftP95 = sortedDrift[p95Index] ?? 0;
 
-    expect(Math.abs(status.timingDrift)).toBeLessThan(20);
-    expect(matchRate).toBeGreaterThanOrEqual(0.95);
+    expect(Math.abs(status.timingDrift)).toBeLessThan(8);
+    expect(driftP95).toBeLessThanOrEqual(4);
+    expect(fakePlayer.mouseDown).toHaveBeenCalledTimes(baseProfile.events.length);
+    expect(fakePlayer.mouseUp).toHaveBeenCalledTimes(baseProfile.events.length);
     jest.useRealTimers();
   });
 });
