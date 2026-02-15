@@ -1,6 +1,6 @@
-import { initializeApp, cert } from 'firebase-admin/app';
+import { initializeApp, cert, App } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import { getAuth } from 'firebase-admin/auth';
+import { getAuth, Auth } from 'firebase-admin/auth';
 
 // In a real implementation, we would load service account credentials from environment variables
 // For MVP/local dev, we might use a mock or a placeholder if credentials aren't present
@@ -9,9 +9,9 @@ const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT
   ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT) 
   : null;
 
-let app;
-let db: FirebaseFirestore.Firestore;
-let auth;
+let app: App | undefined;
+let db: FirebaseFirestore.Firestore | undefined;
+let auth: Auth | undefined;
 
 if (serviceAccount) {
   app = initializeApp({

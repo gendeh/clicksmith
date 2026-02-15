@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import Stripe from 'stripe';
 import { db } from '../config/firebase';
 import { mockDb } from '../store/mockDb';
+import { requireAuthenticatedUid } from '../middleware/auth';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_mock', {
   apiVersion: '2023-10-16',
@@ -9,7 +10,8 @@ const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || 'sk_test_mock', {
 
 export const createCheckoutSession = async (req: Request, res: Response) => {
   try {
-    const { priceId, customerEmail, uid } = req.body;
+    const { priceId, customerEmail } = req.body as { priceId: string; customerEmail?: string };
+    const uid = requireAuthenticatedUid(req);
     const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
 
     if (!process.env.STRIPE_SECRET_KEY) {
@@ -24,7 +26,7 @@ export const createCheckoutSession = async (req: Request, res: Response) => {
       success_url: `${clientUrl}/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `${clientUrl}/cancel`,
       customer_email: customerEmail,
-      metadata: { uid: uid || 'mock-user' },
+      metadata: { uid },
     });
     res.json({ sessionId: session.id, url: session.url });
   } catch (error) {

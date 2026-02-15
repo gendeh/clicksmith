@@ -1,9 +1,9 @@
 import { EventEmitter } from 'events';
 import { ModifierKey, MouseButton, RecordingConfig, RecordedEvent, WindowBounds } from '../types';
 import { capturePatch } from './screenCapture';
-import { computeDHash, computeSha256 } from './imageHash';
 import { createDefaultInputHook, HookEvent, InputHook, HookKeyEvent, HookMouseEvent } from './inputHooks';
 import { WindowManager } from './windowManager';
+import { ImageHashService } from './imageHashService';
 
 const KEYCODE_MAP: Record<number, string> = {
   28: 'enter',
@@ -76,11 +76,13 @@ export class RecordingEngine extends EventEmitter {
   private hookTimeOffsetMs = 0;
   private recordingStartHrNs: bigint = process.hrtime.bigint();
   private hookTimeCalibrator = new HookTimeCalibrator();
+  private hashService: ImageHashService;
 
-  constructor(options?: { inputHook?: InputHook; windowManager?: WindowManager }) {
+  constructor(options?: { inputHook?: InputHook; windowManager?: WindowManager; hashService?: ImageHashService }) {
     super();
     this.inputHook = options?.inputHook ?? createDefaultInputHook();
     this.windowManager = options?.windowManager ?? new WindowManager();
+    this.hashService = options?.hashService ?? new ImageHashService();
   }
 
   public get recording(): boolean {
@@ -162,6 +164,10 @@ export class RecordingEngine extends EventEmitter {
   public resume() {
     this.isRecording = true;
     this.emit('status', { state: 'recording' });
+  }
+
+  public dispose() {
+    this.hashService.dispose();
   }
 
   public injectMouseDown(event: HookMouseEvent) {
@@ -457,8 +463,8 @@ export class RecordingEngine extends EventEmitter {
     try {
       const patch = await capturePatch(Math.round(x), Math.round(y), size);
       event.img_patch_b64 = patch.toString('base64');
-      event.img_hash = computeSha256(patch);
-      const dhash = await computeDHash(patch);
+      const { sha256, dhash } = await this.hashService.compute(patch);
+      event.img_hash = sha256;
       event.metadata = { ...(event.metadata ?? {}), img_dhash: dhash };
     } catch (error) {
       event.metadata = { ...(event.metadata ?? {}), image_error: 'capture_failed' };

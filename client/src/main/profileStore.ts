@@ -3,6 +3,7 @@ import { v4 as uuidv4 } from 'uuid';
 import fs from 'fs';
 import path from 'path';
 import { Profile, ProfileExport, ProfileMetadata, SubscriptionStatus } from '../types';
+import { PatchStore } from './patchStore';
 
 export interface DraftProfile {
   target_app: string;
@@ -17,15 +18,22 @@ export interface DraftProfile {
 
 export class ProfileStore {
   private store: Store;
+  private patchStore: PatchStore;
 
   constructor() {
     this.store = new Store({ name: 'clicksmith-profiles' });
+    const storePath = (this.store as unknown as { path?: string }).path;
+    const patchRoot =
+      storePath && storePath.length > 0
+        ? path.join(path.dirname(storePath), 'patches')
+        : path.join(process.cwd(), '.clicksmith', 'patches');
+    this.patchStore = new PatchStore(patchRoot);
   }
 
   public list(): Profile[] {
-    return (this.store.get('profiles', []) as Profile[]).sort((a, b) =>
-      b.created_at.localeCompare(a.created_at)
-    );
+    return this.getRawProfiles()
+      .map(profile => this.hydrateProfile(profile))
+      .sort((a, b) => b.created_at.localeCompare(a.created_at));
   }
 
   public get(id: string): Profile | undefined {
@@ -33,42 +41,57 @@ export class ProfileStore {
   }
 
   public save(profile: Profile, subscription?: SubscriptionStatus): Profile {
-    const profiles = this.list();
-    const existing = profiles.find(item => item.id === profile.id);
+    const profiles = this.getRawProfiles();
+    const existingIndex = profiles.findIndex(item => item.id === profile.id);
+    const compacted = this.compactProfile(profile);
 
-    if (!existing && subscription?.features.maxProfiles === 3 && profiles.length >= 3) {
+    if (existingIndex === -1 && subscription?.features.maxProfiles === 3 && profiles.length >= 3) {
       throw new Error('Free tier limit reached. Upgrade to Pro for unlimited profiles.');
     }
 
-    if (existing) {
-      const createdAt = existing.metadata?.created_at ?? profile.metadata?.created_at ?? profile.created_at;
+    if (existingIndex >= 0) {
+      const existing = profiles[existingIndex];
+      const createdAt = existing.metadata?.created_at ?? compacted.metadata?.created_at ?? compacted.created_at;
       const mergedCustom = {
         ...(existing.metadata?.custom ?? {}),
-        ...(profile.metadata?.custom ?? {}),
+        ...(compacted.metadata?.custom ?? {}),
       };
       const updatedMeta: ProfileMetadata = {
         created_at: createdAt,
         updated_at: new Date().toISOString(),
-        version: profile.metadata?.version ?? existing.metadata?.version ?? profile.version,
+        version: compacted.metadata?.version ?? existing.metadata?.version ?? compacted.version,
         total_duration_ms:
-          profile.metadata?.total_duration_ms ?? existing.metadata?.total_duration_ms ?? 0,
-        event_count: profile.metadata?.event_count ?? profile.events.length,
+          compacted.metadata?.total_duration_ms ?? existing.metadata?.total_duration_ms ?? 0,
+        event_count: compacted.metadata?.event_count ?? compacted.events.length,
         override_count:
-          profile.metadata?.override_count ??
+          compacted.metadata?.override_count ??
           existing.metadata?.override_count ??
-          profile.events.filter(event => event.human_override).length,
-        tags: profile.metadata?.tags ?? existing.metadata?.tags ?? [],
+          compacted.events.filter(event => event.human_override).length,
+        tags: compacted.metadata?.tags ?? existing.metadata?.tags ?? [],
         custom: Object.keys(mergedCustom).length > 0 ? mergedCustom : undefined,
       };
-      const updated = { ...existing, ...profile, metadata: updatedMeta };
-      const nextProfiles = profiles.map(item => (item.id === profile.id ? updated : item));
-      this.store.set('profiles', nextProfiles);
-      return updated;
+      const updated = { ...existing, ...compacted, metadata: updatedMeta };
+      profiles[existingIndex] = updated;
+      this.setRawProfiles(profiles);
+      return this.hydrateProfile(updated);
     }
 
-    const nextProfiles = [{ ...profile }, ...profiles];
-    this.store.set('profiles', nextProfiles);
-    return profile;
+    profiles.unshift(compacted);
+    this.setRawProfiles(profiles);
+    return this.hydrateProfile(compacted);
+  }
+
+  public create(profile: Profile, subscription?: SubscriptionStatus): Profile {
+    const profiles = this.getRawProfiles();
+    if (subscription?.features.maxProfiles === 3 && profiles.length >= 3) {
+      throw new Error('Free tier limit reached. Upgrade to Pro for unlimited profiles.');
+    }
+
+    const nextId = this.generateUniqueProfileIdFromRaw(profiles);
+    const created = this.compactProfile({ ...profile, id: nextId });
+    profiles.unshift(created);
+    this.setRawProfiles(profiles);
+    return this.hydrateProfile(created);
   }
 
   public update(id: string, updates: Partial<Profile>): Profile {
@@ -77,21 +100,22 @@ export class ProfileStore {
       throw new Error('Profile not found');
     }
     const updated = { ...existing, ...updates };
-    this.save(updated);
-    return updated;
+    return this.save(updated);
   }
 
   public delete(id: string) {
-    const profiles = this.list().filter(profile => profile.id !== id);
-    this.store.set('profiles', profiles);
+    const profiles = this.getRawProfiles().filter(profile => profile.id !== id);
+    this.setRawProfiles(profiles);
   }
 
   public saveDraft(draft: DraftProfile) {
-    this.store.set('draft', draft);
+    this.store.set('draft', this.compactDraft(draft));
   }
 
   public getDraft(): DraftProfile | null {
-    return (this.store.get('draft', null) as DraftProfile | null) ?? null;
+    const draft = (this.store.get('draft', null) as DraftProfile | null) ?? null;
+    if (!draft) return null;
+    return this.hydrateDraft(draft);
   }
 
   public discardDraft() {
@@ -104,8 +128,8 @@ export class ProfileStore {
       throw new Error('No draft profile found');
     }
     const createdAt = draft.created_at ?? new Date().toISOString();
-    const profile: Profile = {
-      id: uuidv4(),
+    return {
+      id: this.generateUniqueProfileId(),
       name,
       target_app: targetApp ?? draft.target_app,
       created_at: createdAt,
@@ -124,13 +148,23 @@ export class ProfileStore {
         tags,
       },
     };
-    return profile;
+  }
+
+  private generateUniqueProfileId(): string {
+    return this.generateUniqueProfileIdFromRaw(this.getRawProfiles());
+  }
+
+  private generateUniqueProfileIdFromRaw(profiles: Profile[]): string {
+    const existing = new Set(profiles.map(profile => profile.id));
+    let id = uuidv4();
+    while (existing.has(id)) {
+      id = uuidv4();
+    }
+    return id;
   }
 
   public exportProfiles(filePath: string, profileIds?: string[]): ProfileExport {
-    const profiles = this.list().filter(profile =>
-      profileIds ? profileIds.includes(profile.id) : true
-    );
+    const profiles = this.list().filter(profile => (profileIds ? profileIds.includes(profile.id) : true));
     const exportPayload: ProfileExport = {
       format_version: '1.0.0',
       profiles,
@@ -144,18 +178,56 @@ export class ProfileStore {
   public importProfiles(filePath: string): Profile[] {
     const raw = fs.readFileSync(filePath, 'utf-8');
     const data = JSON.parse(raw) as ProfileExport;
-    const imported = data.profiles.map(profile => ({
-      ...profile,
-      id: profile.id || uuidv4(),
-      created_at: profile.created_at || new Date().toISOString(),
-      version: profile.version || 1,
-    }));
-    const existing = this.list();
-    this.store.set('profiles', [...imported, ...existing]);
-    return imported;
+    const imported = data.profiles.map(profile =>
+      this.compactProfile({
+        ...profile,
+        id: profile.id || uuidv4(),
+        created_at: profile.created_at || new Date().toISOString(),
+        version: profile.version || 1,
+      })
+    );
+    const existing = this.getRawProfiles();
+    this.setRawProfiles([...imported, ...existing]);
+    return imported.map(profile => this.hydrateProfile(profile));
   }
 
   public suggestExportPath(baseDir: string, filename: string): string {
     return path.join(baseDir, filename);
+  }
+
+  private getRawProfiles(): Profile[] {
+    return this.store.get('profiles', []) as Profile[];
+  }
+
+  private setRawProfiles(profiles: Profile[]) {
+    this.store.set('profiles', profiles);
+  }
+
+  private compactProfile(profile: Profile): Profile {
+    return {
+      ...profile,
+      events: this.patchStore.compactEvents(profile.events),
+    };
+  }
+
+  private hydrateProfile(profile: Profile): Profile {
+    return {
+      ...profile,
+      events: this.patchStore.hydrateEvents(profile.events),
+    };
+  }
+
+  private compactDraft(draft: DraftProfile): DraftProfile {
+    return {
+      ...draft,
+      events: this.patchStore.compactEvents(draft.events),
+    };
+  }
+
+  private hydrateDraft(draft: DraftProfile): DraftProfile {
+    return {
+      ...draft,
+      events: this.patchStore.hydrateEvents(draft.events),
+    };
   }
 }

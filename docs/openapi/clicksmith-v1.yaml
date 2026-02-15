@@ -1,0 +1,420 @@
+openapi: 3.1.0
+info:
+  title: Clicksmith API
+  version: "1.0.0"
+servers:
+  - url: http://localhost:3000
+security:
+  - bearerAuth: []
+paths:
+  /api/v1/auth/signup:
+    post:
+      summary: Create user account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SignupRequest'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+  /api/v1/auth/login:
+    post:
+      summary: Login user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/auth/profile:
+    get:
+      summary: Get authenticated user profile
+      responses:
+        '200':
+          description: Authenticated profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthProfileResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/profiles:
+    get:
+      summary: List user profiles
+      responses:
+        '200':
+          description: Profiles list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      summary: Create profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileCreateRequest'
+      responses:
+        '201':
+          description: Profile created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/profiles/{id}:
+    parameters:
+      - in: path
+        name: id
+        required: true
+        schema:
+          type: string
+    get:
+      summary: Get profile by id
+      responses:
+        '200':
+          description: Profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      summary: Update profile
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileUpdateRequest'
+      responses:
+        '200':
+          description: Profile updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Profile'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      summary: Delete profile
+      responses:
+        '204':
+          description: Profile deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+  /api/v1/billing/checkout:
+    post:
+      summary: Create Stripe checkout
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CheckoutRequest'
+      responses:
+        '200':
+          description: Checkout session
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckoutResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+  /api/v1/image/match:
+    post:
+      summary: Run image matching
+      security: []
+      requestBody:
+        required: true
+      responses:
+        '200':
+          description: Match results
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    BadRequest:
+      description: Invalid request payload
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Unauthorized:
+      description: Missing or invalid auth token
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Forbidden:
+      description: Authenticated but not allowed to access the resource
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+  schemas:
+    ApiError:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+        code:
+          type: string
+        details:
+          type: array
+          items:
+            type: string
+
+    SignupRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email]
+      properties:
+        email:
+          type: string
+        password:
+          type: string
+
+    AuthResponse:
+      type: object
+      required: [token, userId]
+      properties:
+        token:
+          type: string
+        userId:
+          type: string
+        message:
+          type: string
+
+    Subscription:
+      type: object
+      required: [uid, tier, isActive, updatedAt]
+      properties:
+        uid:
+          type: string
+        tier:
+          type: string
+          enum: [free, pro]
+        isActive:
+          type: boolean
+        stripeSubscriptionId:
+          type: string
+        updatedAt:
+          type: string
+
+    AuthProfileResponse:
+      type: object
+      required: [uid, email, subscription]
+      properties:
+        uid:
+          type: string
+        email:
+          type: string
+        subscription:
+          $ref: '#/components/schemas/Subscription'
+
+    RecordedEvent:
+      type: object
+      required: [t_ms, type, x, y, rel_x, rel_y, duration_ms, human_override]
+      properties:
+        t_ms:
+          type: number
+        type:
+          type: string
+          enum: [mouse, keyboard]
+        btn:
+          type: string
+        key:
+          type: string
+        keyCode:
+          type: number
+        x:
+          type: number
+        y:
+          type: number
+        rel_x:
+          type: number
+        rel_y:
+          type: number
+        duration_ms:
+          type: number
+        img_patch_b64:
+          type: string
+        img_hash:
+          type: string
+        human_override:
+          type: boolean
+        metadata:
+          type: object
+          additionalProperties: true
+
+    SuccessMetric:
+      type: object
+      required: [furthest_frame, score]
+      properties:
+        furthest_frame:
+          type: number
+        score:
+          type: number
+
+    ProfileMetadata:
+      type: object
+      required: [created_at, updated_at, version, total_duration_ms, event_count, override_count, tags]
+      properties:
+        created_at:
+          type: string
+        updated_at:
+          type: string
+        version:
+          type: number
+        total_duration_ms:
+          type: number
+        event_count:
+          type: number
+        override_count:
+          type: number
+        tags:
+          type: array
+          items:
+            type: string
+        custom:
+          type: object
+          additionalProperties: true
+
+    Profile:
+      type: object
+      required: [id, name, target_app, created_at, events, success_metric, version, notes]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        target_app:
+          type: string
+        created_at:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecordedEvent'
+        success_metric:
+          $ref: '#/components/schemas/SuccessMetric'
+        version:
+          type: number
+        notes:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/ProfileMetadata'
+        ownerId:
+          type: string
+
+    ProfileCreateRequest:
+      allOf:
+        - $ref: '#/components/schemas/Profile'
+
+    ProfileUpdateRequest:
+      type: object
+      properties:
+        name:
+          type: string
+        target_app:
+          type: string
+        events:
+          type: array
+          items:
+            $ref: '#/components/schemas/RecordedEvent'
+        success_metric:
+          $ref: '#/components/schemas/SuccessMetric'
+        version:
+          type: number
+        notes:
+          type: string
+        metadata:
+          $ref: '#/components/schemas/ProfileMetadata'
+
+    CheckoutRequest:
+      type: object
+      required: [priceId]
+      properties:
+        priceId:
+          type: string
+        customerEmail:
+          type: string
+
+    CheckoutResponse:
+      type: object
+      required: [url]
+      properties:
+        url:
+          type: string

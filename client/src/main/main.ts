@@ -1,5 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, globalShortcut, screen, shell } from 'electron';
 import * as path from 'path';
+import * as fs from 'fs';
 import {
   DEFAULT_HOTKEYS,
   IPC_CHANNELS,
@@ -17,9 +18,13 @@ import { ProfileStore } from './profileStore';
 import { SettingsStore } from './settingsStore';
 import { runAutoTune } from './autoTune';
 import { WindowManager } from './windowManager';
-import { syncProfileToCloud } from './cloudSync';
+import { syncProfileDeleteToCloud, syncProfileToCloud } from './cloudSync';
 import { ModManager } from './modManager';
 import { createDefaultInputHook, HookEvent, HookMouseEvent, InputHook } from './inputHooks';
+import { RunLifecycleEventType, RunLifecycleManager } from './runLifecycle';
+import { RunTraceLogger } from './runTrace';
+import { mergeTakeoverEvents } from './takeoverMerge';
+import { isReplayLive, isReplaySignalActive, ModStatusResponse, validateModStatusPayload } from './modProtocol';
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -32,6 +37,8 @@ const recordingEngine = new RecordingEngine({ windowManager });
 const playbackEngine = new PlaybackEngine({ windowManager });
 const modManager = new ModManager();
 const MOD_ADAPTER_ID = 'geode-geometry-dash';
+const runLifecycle = new RunLifecycleManager();
+const runTrace = new RunTraceLogger();
 
 let lastProfileId: string | null = null;
 let currentRecordingTarget: string | null = null;
@@ -51,22 +58,70 @@ let modStatePollTimer: NodeJS.Timeout | null = null;
 let modAutoFinalizeRecording = false;
 let modTakeoverArmInFlight = false;
 let modTakeoverLastArmAttemptMs = 0;
+let modExpectTakeoverRecording = false;
+let modTakeoverRearmBlockedUntilMs = 0;
+let modReplaySignalLastSeenMs = 0;
+let modReplayLastUnpauseMs = 0;
+let modTakeoverResumeGuardActive = false;
+let modTakeoverResumeGuardReplayIndex = -1;
+let modStatusPollMisses = 0;
 let autoTakeoverHookActive = false;
 let autoTakeoverHookTriggered = false;
+let autoTakeoverSuppressUntilMs = 0;
+let lastModReplayPaused = false;
+let lastRecordingEngineState: string = 'idle';
+let lastPlaybackEngineState: string = 'idle';
+let lastLoggedDispatchRunId: string | null = null;
+let lastLoggedDispatchAttempt = -1;
+let lastLoggedDispatchIndex = -1;
+let activeModPlaybackEvents: ModMacroEvent[] = [];
 const autoTakeoverHook: InputHook = createDefaultInputHook();
+const AUTO_TAKEOVER_SUPPRESS_WINDOW_MS = 90;
+
+function resolvePreloadPath(): string {
+  const candidates = [
+    path.join(__dirname, 'main', 'preload.js'),
+    path.join(__dirname, 'preload.js'),
+    path.join(__dirname, '..', 'main', 'preload.js'),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0];
+}
 
 function broadcastStatus(channel: string, data: any) {
   mainWindow?.webContents.send(channel, data);
   overlayWindow?.webContents.send(channel, data);
 }
 
+function clearPendingDraftState() {
+  profileStore.discardDraft();
+  lastDraftProfile = null;
+  draftQuickReplayPending = false;
+}
+
+function applyLifecycle(type: RunLifecycleEventType, note?: string) {
+  const transition = runLifecycle.apply({ type, atMs: Date.now(), note });
+  if (transition.changed) {
+    runTrace.logTransition(transition);
+  }
+  return transition.next;
+}
+
 function createMainWindow() {
+  const preloadPath = resolvePreloadPath();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 840,
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: preloadPath,
     },
     title: 'Clicksmith Profile Manager',
     icon: path.join(__dirname, '../../public/icon.ico'),
@@ -93,6 +148,7 @@ function createMainWindow() {
 }
 
 function createOverlayWindow() {
+  const preloadPath = resolvePreloadPath();
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width } = primaryDisplay.workAreaSize;
   const overlayWidth = 360;
@@ -113,8 +169,9 @@ function createOverlayWindow() {
     roundedCorners: false,
     backgroundColor: '#00000000',
     webPreferences: {
-      nodeIntegration: true,
-      contextIsolation: false,
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: preloadPath,
     },
     title: 'Clicksmith Overlay',
   });
@@ -164,7 +221,7 @@ function buildPlaybackConfig(config: Partial<PlaybackConfig>): PlaybackConfig {
     takeoverHotkey: config.takeoverHotkey ?? preferences.hotkeys.takeover,
     speedMultiplier: config.speedMultiplier ?? preferences.defaultPlaybackConfig.speedMultiplier ?? 1,
     useRelativeCoords: config.useRelativeCoords ?? preferences.defaultPlaybackConfig.useRelativeCoords ?? true,
-    imageSearchRadius: config.imageSearchRadius ?? 160,
+    imageSearchRadius: config.imageSearchRadius ?? preferences.defaultPlaybackConfig.imageSearchRadius ?? 160,
     snapToHz: config.snapToHz ?? preferences.defaultPlaybackConfig.snapToHz ?? 240,
     snapMode: config.snapMode ?? preferences.defaultPlaybackConfig.snapMode ?? 'duration-lock',
     snapPhaseMs: config.snapPhaseMs ?? preferences.defaultPlaybackConfig.snapPhaseMs ?? 0,
@@ -260,9 +317,14 @@ function clearModStatePollTimer() {
 function clearStaleModRecordingState() {
   recordingViaMod = false;
   modTakeoverArmed = false;
+  modExpectTakeoverRecording = false;
   modAutoFinalizeRecording = false;
   modTakeoverArmInFlight = false;
   modTakeoverLastArmAttemptMs = 0;
+  modTakeoverRearmBlockedUntilMs = 0;
+  modTakeoverResumeGuardActive = false;
+  modTakeoverResumeGuardReplayIndex = -1;
+  lastModReplayPaused = false;
   activeModBaseUrl = null;
   broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle' });
 }
@@ -273,13 +335,21 @@ function settleModPlaybackIdle(totalEvents = 0) {
   playbackViaMod = false;
   recordingViaMod = false;
   modTakeoverArmed = false;
+  modExpectTakeoverRecording = false;
   modAutoFinalizeRecording = false;
   modTakeoverArmInFlight = false;
   modTakeoverLastArmAttemptMs = 0;
+  modTakeoverRearmBlockedUntilMs = 0;
+  modReplaySignalLastSeenMs = 0;
+  modReplayLastUnpauseMs = 0;
+  modTakeoverResumeGuardActive = false;
+  modTakeoverResumeGuardReplayIndex = -1;
+  lastModReplayPaused = false;
   activeModBaseUrl = null;
   pendingTakeoverProfile = null;
   pendingTakeoverStartMs = null;
   lastPlaybackLeadInMs = 0;
+  activeModPlaybackEvents = [];
   disarmAutoTakeoverHook();
   broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', totalEvents));
 }
@@ -299,19 +369,98 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
   modStatePollTimer = setInterval(() => {
     void (async () => {
       const status = await modGetStatus(baseUrl);
-      if (!status?.ok) return;
+      if (!status?.ok) {
+        modStatusPollMisses += 1;
+        if (modStatusPollMisses >= 5 && (playbackViaMod || recordingViaMod)) {
+          const errorText = 'mod_status_contract_invalid';
+          broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', totalEvents, errorText));
+          broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle', error: errorText });
+          settleModPlaybackIdle(totalEvents);
+          clearStaleModRecordingState();
+        }
+        return;
+      }
+      modStatusPollMisses = 0;
+
+      const replayState = status.replay_state;
+      const recordState = status.record_state;
+      const replaySignal = isReplaySignalActive(status);
+      const recordActiveSignal = recordState === 'live';
+      const recordArmedSignal = recordState === 'armed';
 
       if (recordingViaMod) {
-        if (status.record_active) {
+        if (recordActiveSignal) {
+          if (runLifecycle.getSnapshot().state === 'record_armed') {
+            applyLifecycle('attempt_boundary', 'adapter_record_active');
+          }
           broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
-        } else if (status.record_armed) {
+        } else if (recordArmedSignal) {
+          if (runLifecycle.getSnapshot().state === 'idle') {
+            applyLifecycle('arm_record', 'adapter_record_armed');
+          }
           broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'armed' });
         }
       }
       modTakeoverArmed = Boolean(status.takeover_armed);
+      if (playbackViaMod && (replaySignal || status.paused)) {
+        modReplaySignalLastSeenMs = Date.now();
+      }
+      // Treat adapter paused flag as authoritative even if replay_state
+      // transiently reports "live" during menu/pause transitions.
+      const replayPaused = Boolean(status.paused && (replaySignal || playbackViaMod)) || replayState === 'paused';
+      if (playbackViaMod && (replaySignal || replayPaused)) {
+        if (replayPaused) {
+          if (!lastModReplayPaused) {
+            applyLifecycle('pause', 'adapter_replay_paused');
+            modTakeoverRearmBlockedUntilMs = Date.now() + 1200;
+            modTakeoverResumeGuardActive = true;
+            modTakeoverResumeGuardReplayIndex = (status.replay_index ?? 0) + 1;
+            modExpectTakeoverRecording = false;
+          }
+          broadcastStatus(
+            IPC_CHANNELS.PLAYBACK_STATUS,
+            buildModPlaybackStatus('paused', totalEvents, undefined, status.replay_index ?? 0, status.game_tick)
+          );
+        } else {
+          if (lastModReplayPaused) {
+            applyLifecycle('unpause', 'adapter_replay_unpaused');
+            modReplayLastUnpauseMs = Date.now();
+            modTakeoverRearmBlockedUntilMs = Math.max(modTakeoverRearmBlockedUntilMs, Date.now() + 900);
+            modExpectTakeoverRecording = false;
+          }
+          if (modTakeoverResumeGuardActive) {
+            const replayIndex = status.replay_index ?? 0;
+            if (replayIndex >= modTakeoverResumeGuardReplayIndex) {
+              modTakeoverResumeGuardActive = false;
+              modTakeoverResumeGuardReplayIndex = -1;
+            }
+          }
+          logModDispatchProgress(status);
+          broadcastStatus(
+            IPC_CHANNELS.PLAYBACK_STATUS,
+            buildModPlaybackStatus('playing', totalEvents, undefined, status.replay_index ?? 0, status.game_tick)
+          );
+        }
+      } else if (lastModReplayPaused) {
+        applyLifecycle('unpause', 'adapter_replay_left_paused');
+        modReplayLastUnpauseMs = Date.now();
+        modTakeoverRearmBlockedUntilMs = Math.max(modTakeoverRearmBlockedUntilMs, Date.now() + 900);
+        modExpectTakeoverRecording = false;
+      }
+      lastModReplayPaused = replayPaused;
+      if (playbackViaMod && isReplayLive(status) && runLifecycle.getSnapshot().state === 'replay_armed') {
+        applyLifecycle('attempt_boundary', 'adapter_replay_active');
+      }
 
       const finalizeFromCompletion = !!status.record_complete;
-      const finalizeFromIdle = recordingViaMod && !status.record_active && !status.record_armed;
+      const finalizeFromIdle = recordingViaMod && !recordActiveSignal && !recordArmedSignal;
+
+      if (recordActiveSignal && status.paused && !recordingViaMod) {
+        await modRequest<ModStatusResponse>(baseUrl, '/record/stop').catch(() => null);
+        modExpectTakeoverRecording = false;
+        broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle' });
+        return;
+      }
 
       if (finalizeFromCompletion || finalizeFromIdle) {
         if (modAutoFinalizeRecording) return;
@@ -328,25 +477,42 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
       }
 
       const adapterBusy = Boolean(
-        status.record_active ||
-          status.record_armed ||
+        recordActiveSignal ||
+          recordArmedSignal ||
           status.record_complete ||
-          status.replay_active ||
-          status.replay_armed ||
-          status.replay_requested ||
+          replaySignal ||
           status.takeover_armed
       );
 
       if (!playbackViaMod && !recordingViaMod && !modTakeoverArmed && !pendingTakeoverProfile && !adapterBusy) {
+        modTakeoverResumeGuardActive = false;
+        modTakeoverResumeGuardReplayIndex = -1;
         clearModStatePollTimer();
         return;
       }
 
-      if (playbackViaMod && status.record_active && !status.replay_active) {
+      if (playbackViaMod && recordActiveSignal) {
+        const explicitTakeoverTransition = modExpectTakeoverRecording || status.takeover_armed || modTakeoverArmed;
+        if (!explicitTakeoverTransition) {
+          // Ignore transient adapter states while replay is still active or paused.
+          if (replaySignal || status.paused) {
+            return;
+          }
+          await modRequest<ModStatusResponse>(baseUrl, '/record/stop').catch(() => null);
+          recordingViaMod = false;
+          broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle' });
+          if (!status.paused) {
+            applyLifecycle('stop_replay', 'adapter_unexpected_record_active');
+            settleModPlaybackIdle(totalEvents);
+          }
+          return;
+        }
         clearModPlaybackAutoIdleTimer();
+        applyLifecycle('takeover_click', 'adapter_takeover_record_active');
         playbackViaMod = false;
         recordingViaMod = true;
         modTakeoverArmed = true;
+        modExpectTakeoverRecording = false;
         disarmAutoTakeoverHook();
         broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', totalEvents));
         broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
@@ -356,12 +522,14 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
       if (
         playbackViaMod &&
         shouldAutoTakeover() &&
+        !modTakeoverResumeGuardActive &&
         !status.takeover_armed &&
-        (status.replay_active || status.replay_armed || status.replay_requested) &&
+        !status.paused &&
+        isReplayLive(status) &&
         !!lastPlaybackProfile
       ) {
         const now = Date.now();
-        if (!modTakeoverArmInFlight && now - modTakeoverLastArmAttemptMs >= 400) {
+        if (!modTakeoverArmInFlight && now - modTakeoverLastArmAttemptMs >= 400 && now >= modTakeoverRearmBlockedUntilMs) {
           modTakeoverArmInFlight = true;
           modTakeoverLastArmAttemptMs = now;
           void armModTakeover(lastPlaybackProfile).finally(() => {
@@ -372,46 +540,21 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
 
       if (
         playbackViaMod &&
-        !status.replay_active &&
-        !status.replay_requested &&
-        !status.replay_armed &&
-        !status.record_active
+        !replaySignal &&
+        !recordActiveSignal &&
+        !status.paused
       ) {
+        // Pause/menu transitions can produce a brief "all false" window.
+        // Only settle idle after the adapter has been replay-silent long enough.
+        const replaySilentMs = Date.now() - modReplaySignalLastSeenMs;
+        if (replaySilentMs < 1200) {
+          return;
+        }
+        applyLifecycle('stop_replay', 'adapter_replay_idle');
         settleModPlaybackIdle(totalEvents);
       }
     })();
   }, 120);
-}
-
-function mergeTakeoverEvents(
-  baseProfile: Profile,
-  takeoverStartMs: number,
-  takeoverEvents: RecordedEvent[]
-): RecordedEvent[] {
-  const clampedBase = baseProfile.events
-    .filter(event => event.t_ms <= takeoverStartMs)
-    .map(event => {
-      const duration = Math.max(0, event.duration_ms ?? 0);
-      if (duration <= 0) return event;
-      const end = event.t_ms + duration;
-      if (end <= takeoverStartMs) return event;
-      return {
-        ...event,
-        duration_ms: Math.max(0, takeoverStartMs - event.t_ms),
-      };
-    });
-
-  const takeoverSegment = takeoverEvents.map(event => ({
-    ...event,
-    t_ms: event.t_ms + takeoverStartMs,
-    human_override: true,
-    metadata: {
-      ...(event.metadata ?? {}),
-      takeover_segment: true,
-    },
-  }));
-
-  return [...clampedBase, ...takeoverSegment].sort((a, b) => a.t_ms - b.t_ms);
 }
 
 type ModMacroEvent = {
@@ -430,20 +573,18 @@ type ModRecordResponse = {
   error?: string;
 };
 
-type ModStatusResponse = {
-  ok: boolean;
-  state?: string;
-  tick_hz?: number;
-  capabilities?: string[];
-  record_active?: boolean;
-  record_armed?: boolean;
-  record_complete?: boolean;
-  replay_active?: boolean;
-  replay_armed?: boolean;
-  replay_requested?: boolean;
-  takeover_armed?: boolean;
-  error?: string;
-};
+const MOD_STATUS_TIMEOUT_MS = 900;
+const MOD_REQUEST_TIMEOUT_MS = 1600;
+
+async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(url, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 async function resolveModBaseUrl(): Promise<string | null> {
   const status = await modManager.probeAdapter(MOD_ADAPTER_ID);
@@ -457,11 +598,23 @@ async function resolveModBaseUrl(): Promise<string | null> {
 }
 
 async function modRequest<T>(baseUrl: string, path: string, body?: Record<string, unknown>): Promise<T> {
-  const response = await fetch(`${baseUrl}${path}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let response: Response;
+  try {
+    response = await fetchJsonWithTimeout(
+      `${baseUrl}${path}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: body ? JSON.stringify(body) : undefined,
+      },
+      MOD_REQUEST_TIMEOUT_MS
+    );
+  } catch (error: any) {
+    if (error?.name === 'AbortError') {
+      throw new Error('mod_request_timeout');
+    }
+    throw error;
+  }
   const data = (await response.json()) as T;
   if (!response.ok) {
     throw new Error((data as any)?.error ?? `Mod request failed (${response.status})`);
@@ -471,9 +624,14 @@ async function modRequest<T>(baseUrl: string, path: string, body?: Record<string
 
 async function modGetStatus(baseUrl: string): Promise<ModStatusResponse | null> {
   try {
-    const response = await fetch(`${baseUrl}/status`);
+    const response = await fetchJsonWithTimeout(`${baseUrl}/status`, { method: 'GET' }, MOD_STATUS_TIMEOUT_MS);
     if (!response.ok) return null;
-    return (await response.json()) as ModStatusResponse;
+    const payload = await response.json();
+    const validation = validateModStatusPayload(payload);
+    if (!validation.ok) {
+      return null;
+    }
+    return validation.status;
   } catch {
     return null;
   }
@@ -481,6 +639,42 @@ async function modGetStatus(baseUrl: string): Promise<ModStatusResponse | null> 
 
 function isModRecordingLifecycleActive(status: ModStatusResponse): boolean {
   return Boolean(status.record_active || status.record_armed || status.record_complete || status.takeover_armed);
+}
+
+function logModDispatchProgress(status: ModStatusResponse) {
+  const adapterIndex =
+    typeof status.replay_index === 'number' && Number.isFinite(status.replay_index)
+      ? Math.max(0, Math.floor(status.replay_index))
+      : -1;
+  if (adapterIndex < 0) return;
+
+  const snapshot = runLifecycle.getSnapshot();
+  const runChanged = lastLoggedDispatchRunId !== snapshot.runId || lastLoggedDispatchAttempt !== snapshot.attemptId;
+  if (runChanged) {
+    lastLoggedDispatchRunId = snapshot.runId;
+    lastLoggedDispatchAttempt = snapshot.attemptId;
+    lastLoggedDispatchIndex = -1;
+  }
+  if (adapterIndex <= lastLoggedDispatchIndex) return;
+
+  const eventIndex = Math.max(0, adapterIndex - 1);
+  const tickMs = 1000 / 240;
+  const scheduledMs = activeModPlaybackEvents[eventIndex]?.t_ms ?? eventIndex * tickMs;
+  const actualMs =
+    typeof status.game_tick === 'number' && Number.isFinite(status.game_tick)
+      ? Math.max(0, status.game_tick * tickMs)
+      : scheduledMs;
+
+  runTrace.logDispatch({
+    runId: snapshot.runId,
+    attemptId: snapshot.attemptId,
+    eventIndex,
+    scheduledMs,
+    actualMs,
+    deltaMs: actualMs - scheduledMs,
+    action: 'mod_playback_event',
+  });
+  lastLoggedDispatchIndex = adapterIndex;
 }
 
 async function resolveModRecordingState(): Promise<{ baseUrl: string; status: ModStatusResponse } | null> {
@@ -592,6 +786,11 @@ function convertModEventsToRecordedEvents(events: ModMacroEvent[]): RecordedEven
 }
 
 function convertRecordedEventsToModEvents(events: RecordedEvent[]): ModMacroEvent[] {
+  const tickMs = 1000 / 240;
+  const snapToTick = (value: number) => {
+    if (!Number.isFinite(value) || value <= 0) return 0;
+    return Math.round(value / tickMs) * tickMs;
+  };
   const rawEvents: ModMacroEvent[] = [];
   events.forEach(event => {
     const metadata = event.metadata as Record<string, unknown> | undefined;
@@ -633,25 +832,25 @@ function convertRecordedEventsToModEvents(events: RecordedEvent[]): ModMacroEven
 
     // Preserve raw Geode edge events without creating synthetic jumps.
     if (source === 'geode' && action === 'up' && durationMs <= 0) {
-      rawEvents.push({ t_ms: event.t_ms, button, down: false, player2 });
+      rawEvents.push({ t_ms: snapToTick(event.t_ms), button, down: false, player2 });
       return;
     }
 
-    rawEvents.push({ t_ms: event.t_ms, button, down: true, player2 });
+    rawEvents.push({ t_ms: snapToTick(event.t_ms), button, down: true, player2 });
 
     if (source === 'geode' && action === 'down') {
       if (typeof releaseAt === 'number' && releaseAt >= event.t_ms) {
-        rawEvents.push({ t_ms: releaseAt, button, down: false, player2 });
+        rawEvents.push({ t_ms: snapToTick(releaseAt), button, down: false, player2 });
       } else if (durationMs > 0) {
-        rawEvents.push({ t_ms: event.t_ms + durationMs, button, down: false, player2 });
+        rawEvents.push({ t_ms: snapToTick(event.t_ms + durationMs), button, down: false, player2 });
       }
       return;
     }
 
     if (durationMs > 0) {
-      rawEvents.push({ t_ms: event.t_ms + durationMs, button, down: false, player2 });
+      rawEvents.push({ t_ms: snapToTick(event.t_ms + durationMs), button, down: false, player2 });
     } else {
-      rawEvents.push({ t_ms: event.t_ms, button, down: false, player2 });
+      rawEvents.push({ t_ms: snapToTick(event.t_ms), button, down: false, player2 });
     }
   });
 
@@ -684,13 +883,16 @@ function convertRecordedEventsToModEvents(events: RecordedEvent[]): ModMacroEven
 function buildModPlaybackStatus(
   state: PlaybackStatus['state'],
   totalEvents = 0,
-  lastError?: string
+  lastError?: string,
+  currentEventIndex = 0,
+  gameTick?: number
 ): PlaybackStatus {
+  const tickMs = 1000 / 240;
   return {
     state,
-    currentEventIndex: 0,
+    currentEventIndex,
     totalEvents,
-    elapsedMs: 0,
+    elapsedMs: typeof gameTick === 'number' ? Math.max(0, gameTick * tickMs) : 0,
     successfulMatches: 0,
     failedMatches: 0,
     retries: 0,
@@ -741,6 +943,7 @@ function disarmAutoTakeoverHook() {
   if (!autoTakeoverHookActive) return;
   autoTakeoverHookActive = false;
   autoTakeoverHookTriggered = false;
+  autoTakeoverSuppressUntilMs = 0;
   autoTakeoverHook.stop();
   autoTakeoverHook.removeAllListeners();
 }
@@ -752,6 +955,7 @@ function armAutoTakeoverHook() {
   autoTakeoverHook.removeAllListeners();
   autoTakeoverHook.on('mousedown', (event: HookEvent) => {
     if (autoTakeoverHookTriggered) return;
+    if (Date.now() <= autoTakeoverSuppressUntilMs) return;
     const mouseEvent = event as HookMouseEvent;
     const button = mouseEvent.button ?? 1;
     if (button !== 1) return;
@@ -767,13 +971,16 @@ function armAutoTakeoverHook() {
 async function startModRecording(target: string): Promise<{ success: boolean; error?: string }> {
   const baseUrl = await resolveModBaseUrl();
   if (!baseUrl) return { success: false, error: 'mod_unreachable' };
+  clearPendingDraftState();
   clearModPlaybackAutoIdleTimer();
   clearModStatePollTimer();
   lastPlaybackLeadInMs = 0;
   pendingTakeoverProfile = null;
   pendingTakeoverStartMs = null;
   modTakeoverArmed = false;
+  modExpectTakeoverRecording = false;
   modAutoFinalizeRecording = false;
+  modTakeoverRearmBlockedUntilMs = 0;
   playbackViaMod = false;
   const response = await modRequest<ModStatusResponse>(baseUrl, '/record/start', { target });
   if (!response.ok) {
@@ -784,12 +991,14 @@ async function startModRecording(target: string): Promise<{ success: boolean; er
   // Keep adapter status polling active during plain recording as well so
   // auto-stop on death/complete is always finalized into a draft.
   startModStatePolling(baseUrl, 0);
+  applyLifecycle('arm_record', 'mod_record_start');
   broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'armed' });
   return { success: true };
 }
 
 async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?: any; error?: string }> {
   if (!activeModBaseUrl) return { success: false, error: 'mod_unreachable' };
+  modExpectTakeoverRecording = false;
   let response: ModRecordResponse;
   try {
     response = await modRequest<ModRecordResponse>(activeModBaseUrl, '/record/stop');
@@ -835,6 +1044,7 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
     activeModBaseUrl = null;
     lastDraftProfile = null;
     draftQuickReplayPending = false;
+    applyLifecycle('stop_record', 'mod_record_cancel_empty');
     broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle' });
     return { success: true, profile: { events: [], duration: 0 } };
   }
@@ -869,6 +1079,8 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
   activeModBaseUrl = null;
   lastDraftProfile = buildDraftPlaybackProfile();
   draftQuickReplayPending = true;
+  applyLifecycle('stop_record', 'mod_record_finalize');
+  applyLifecycle('finalize_done', 'mod_record_saved_draft');
   broadcastStatus(IPC_CHANNELS.RUN_COMPLETE, {
     source: 'recording',
     draft: profileStore.getDraft(),
@@ -900,6 +1112,7 @@ async function armModTakeover(profile: Profile): Promise<{ success: boolean; err
   activeModBaseUrl = baseUrl;
   currentRecordingTarget = profile.target_app;
   modTakeoverArmed = true;
+  modExpectTakeoverRecording = true;
   modTakeoverLastArmAttemptMs = Date.now();
   return { success: true };
 }
@@ -919,6 +1132,7 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
   // Always clear any stale replay arm/state before arming a fresh replay.
   await modRequest<ModStatusResponse>(baseUrl, '/replay/stop').catch(() => null);
   const modEvents = convertRecordedEventsToModEvents(profile.events);
+  activeModPlaybackEvents = modEvents;
   const response = await modRequest<ModStatusResponse>(baseUrl, '/replay/start', { events: modEvents });
   if (!response.ok) {
     const errorText = response.error ?? 'replay_start_failed';
@@ -927,9 +1141,13 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
   }
   playbackViaMod = true;
   activeModBaseUrl = baseUrl;
+  applyLifecycle('arm_replay', 'mod_replay_start');
   modTakeoverArmed = false;
+  modExpectTakeoverRecording = false;
   modTakeoverArmInFlight = false;
   modTakeoverLastArmAttemptMs = 0;
+  modTakeoverRearmBlockedUntilMs = 0;
+  lastModReplayPaused = false;
   recordingViaMod = false;
   modAutoFinalizeRecording = false;
   if (shouldAutoTakeover()) {
@@ -956,9 +1174,11 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
 
 async function stopModPlayback(): Promise<{ success: boolean; error?: string }> {
   if (!activeModBaseUrl) return { success: false, error: 'mod_unreachable' };
+  modExpectTakeoverRecording = false;
   clearModPlaybackAutoIdleTimer();
   clearModStatePollTimer();
   await modRequest<ModStatusResponse>(activeModBaseUrl, '/replay/stop').catch(() => null);
+  applyLifecycle('stop_replay', 'mod_replay_stop');
   settleModPlaybackIdle();
   return { success: true };
 }
@@ -973,6 +1193,7 @@ async function startModTakeoverImmediate(): Promise<{ success: boolean; error?: 
   }
   pendingTakeoverProfile = lastPlaybackProfile;
   pendingTakeoverStartMs = null;
+  modExpectTakeoverRecording = true;
 
   const response = await modRequest<ModStatusResponse>(baseUrl, '/replay/takeover', { immediate: true }).catch(
     () => null
@@ -980,11 +1201,13 @@ async function startModTakeoverImmediate(): Promise<{ success: boolean; error?: 
   if (!response?.ok) {
     const status = await modGetStatus(baseUrl);
     if (!status?.record_active) {
+      modExpectTakeoverRecording = false;
       return { success: false, error: response?.error ?? status?.error ?? 'takeover_failed' };
     }
   }
 
   clearModPlaybackAutoIdleTimer();
+  applyLifecycle('takeover_click', 'mod_takeover_immediate');
   playbackViaMod = false;
   recordingViaMod = true;
   modTakeoverArmed = true;
@@ -1010,10 +1233,13 @@ async function startLocalTakeover(triggerEvent?: HookMouseEvent): Promise<{ succ
   const target = lastPlaybackTarget ?? lastPlaybackProfile.target_app ?? 'screen';
   currentRecordingTarget = target;
   disarmAutoTakeoverHook();
+  applyLifecycle('takeover_click', 'local_takeover');
   await playbackEngine.stop();
   recordingEngine.setTakeoverActive(true);
   const result = await recordingEngine.start(buildRecordingConfig({ target }));
   if (result.success) {
+    applyLifecycle('arm_record', 'local_record_start');
+    applyLifecycle('attempt_boundary', 'local_record_live_immediate');
     if (triggerEvent) {
       recordingEngine.injectMouseDown(triggerEvent);
     }
@@ -1054,6 +1280,8 @@ async function stopRecordingAndDraft() {
     });
     lastDraftProfile = buildDraftPlaybackProfile();
     draftQuickReplayPending = true;
+    applyLifecycle('stop_record', 'local_record_finalize');
+    applyLifecycle('finalize_done', 'local_record_saved_draft');
     currentRecordingTarget = null;
     broadcastStatus(IPC_CHANNELS.RUN_COMPLETE, {
       source: 'recording',
@@ -1070,13 +1298,156 @@ async function triggerTakeover(): Promise<{ success: boolean; error?: string }> 
   return startLocalTakeover();
 }
 
+type NoPayload = undefined | null;
+type IpcInvalidPayload = {
+  success: false;
+  error: 'E_IPC_INVALID_PAYLOAD';
+  code: 'E_IPC_INVALID_PAYLOAD';
+  channel: string;
+};
+
+function ipcInvalidPayload(channel: string): IpcInvalidPayload {
+  return {
+    success: false,
+    error: 'E_IPC_INVALID_PAYLOAD',
+    code: 'E_IPC_INVALID_PAYLOAD',
+    channel,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
+function isNoPayload(value: unknown): value is NoPayload {
+  return value === undefined || value === null;
+}
+
+function isString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every(item => typeof item === 'string');
+}
+
+function isRecordingConfigPayload(value: unknown): value is Partial<RecordingConfig> {
+  if (!isRecord(value)) return false;
+  if (value.target !== undefined && typeof value.target !== 'string') return false;
+  if (value.captureImages !== undefined && typeof value.captureImages !== 'boolean') return false;
+  if (value.imagePatchSize !== undefined && typeof value.imagePatchSize !== 'number') return false;
+  if (value.minEventInterval !== undefined && typeof value.minEventInterval !== 'number') return false;
+  if (value.recordKeyboard !== undefined && typeof value.recordKeyboard !== 'boolean') return false;
+  if (value.recordMouse !== undefined && typeof value.recordMouse !== 'boolean') return false;
+  if (value.stopHotkey !== undefined && typeof value.stopHotkey !== 'string') return false;
+  if (value.takeoverHotkey !== undefined && typeof value.takeoverHotkey !== 'string') return false;
+  return true;
+}
+
+function isPlaybackConfigPayload(value: unknown): value is Partial<PlaybackConfig> {
+  if (!isRecord(value)) return false;
+  if (!isString(value.profileId)) return false;
+  if (value.target !== undefined && typeof value.target !== 'string') return false;
+  if (value.useImageMatching !== undefined && typeof value.useImageMatching !== 'boolean') return false;
+  if (value.imageMatchThreshold !== undefined && typeof value.imageMatchThreshold !== 'number') return false;
+  if (value.timingTolerance !== undefined && typeof value.timingTolerance !== 'number') return false;
+  if (value.retryCount !== undefined && typeof value.retryCount !== 'number') return false;
+  if (value.retryDelay !== undefined && typeof value.retryDelay !== 'number') return false;
+  if (value.imageSearchRadius !== undefined && typeof value.imageSearchRadius !== 'number') return false;
+  if (value.takeoverHotkey !== undefined && typeof value.takeoverHotkey !== 'string') return false;
+  if (value.speedMultiplier !== undefined && typeof value.speedMultiplier !== 'number') return false;
+  if (value.useRelativeCoords !== undefined && typeof value.useRelativeCoords !== 'boolean') return false;
+  if (value.snapToHz !== undefined && typeof value.snapToHz !== 'number') return false;
+  if (value.snapMode !== undefined && !['nearest', 'floor', 'duration-lock'].includes(String(value.snapMode))) {
+    return false;
+  }
+  if (value.snapPhaseMs !== undefined && typeof value.snapPhaseMs !== 'number') return false;
+  return true;
+}
+
+function isProfilePayload(value: unknown): value is Profile {
+  if (!isRecord(value)) return false;
+  if (!isString(value.id) || !isString(value.name) || !isString(value.target_app)) return false;
+  if (!isString(value.created_at) || !isString(value.notes)) return false;
+  if (typeof value.version !== 'number') return false;
+  if (!Array.isArray(value.events)) return false;
+  if (!isRecord(value.success_metric)) return false;
+  return true;
+}
+
+function isDraftSavePayload(
+  value: unknown
+): value is { name: string; notes: string; tags: string[]; autoTune?: Profile['auto_tune'] } {
+  if (!isRecord(value)) return false;
+  if (!isString(value.name)) return false;
+  if (typeof value.notes !== 'string') return false;
+  if (!isStringArray(value.tags)) return false;
+  return true;
+}
+
+function isProfileSelectPayload(value: unknown): value is { profileId?: string | null } {
+  if (!isRecord(value)) return false;
+  if (value.profileId === undefined || value.profileId === null) return true;
+  return typeof value.profileId === 'string';
+}
+
+function isSettingsPayload(value: unknown): value is Partial<UserPreferences> {
+  return isRecord(value);
+}
+
+function isBooleanPayload(value: unknown): value is boolean {
+  return typeof value === 'boolean';
+}
+
+function isSubscriptionPayload(value: unknown): value is ReturnType<SettingsStore['getSubscription']> {
+  return isRecord(value);
+}
+
+function isBillingPayload(value: unknown): value is { priceId: string } {
+  return isRecord(value) && isString(value.priceId);
+}
+
+function isAuthLoginPayload(value: unknown): value is { email: string; password?: string } {
+  if (!isRecord(value)) return false;
+  if (!isString(value.email)) return false;
+  if (value.password !== undefined && typeof value.password !== 'string') return false;
+  return true;
+}
+
+function isIdPayload(value: unknown): value is { id: string } {
+  return isRecord(value) && isString(value.id);
+}
+
+function isUrlPayload(value: unknown): value is { url: string } {
+  return isRecord(value) && isString(value.url);
+}
+
+function isProfileIdList(value: unknown): value is string[] | undefined {
+  return value === undefined || isStringArray(value);
+}
+
+function registerValidatedHandle<TPayload, TResult>(
+  channel: string,
+  validate: (payload: unknown) => payload is TPayload,
+  handler: (payload: TPayload) => Promise<TResult> | TResult
+) {
+  ipcMain.handle(channel, async (_event, payload: unknown) => {
+    if (!validate(payload)) {
+      return ipcInvalidPayload(channel);
+    }
+    return handler(payload);
+  });
+}
+
 function setupIpcHandlers() {
-  ipcMain.handle(IPC_CHANNELS.RECORDING_START, async (_, config: RecordingConfig) => {
+  registerValidatedHandle(IPC_CHANNELS.RECORDING_START, isRecordingConfigPayload, async config => {
     const normalized = buildRecordingConfig(config);
+    clearPendingDraftState();
     currentRecordingTarget = normalized.target;
     const preferences = settingsStore.getPreferences();
     const adapterReachable = await isModAdapterReachable();
-    const useModAdapterForThisRun = preferences.useModAdapter || adapterReachable;
+    const useModAdapterForThisRun =
+      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(normalized.target));
     recordingEngine.setTakeoverActive(false);
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
@@ -1093,12 +1464,14 @@ function setupIpcHandlers() {
 
     const result = await recordingEngine.start(normalized);
     if (result.success) {
+      applyLifecycle('arm_record', 'local_record_start_ipc');
+      applyLifecycle('attempt_boundary', 'local_record_live_ipc');
       broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
     }
     return result;
   });
 
-  ipcMain.handle(IPC_CHANNELS.RECORDING_STOP, async () => {
+  registerValidatedHandle(IPC_CHANNELS.RECORDING_STOP, isNoPayload, async () => {
     const modState = await resolveModRecordingState();
     const shouldStopMod =
       recordingViaMod || modTakeoverArmed || (modState ? isModRecordingLifecycleActive(modState.status) : false);
@@ -1124,7 +1497,7 @@ function setupIpcHandlers() {
     return stopRecordingAndDraft();
   });
 
-  ipcMain.handle(IPC_CHANNELS.PLAYBACK_START, async (_, config: PlaybackConfig) => {
+  registerValidatedHandle(IPC_CHANNELS.PLAYBACK_START, isPlaybackConfigPayload, async config => {
     const playbackConfig = buildPlaybackConfig(config);
     const profile = profileStore.get(playbackConfig.profileId);
     if (!profile) {
@@ -1140,7 +1513,7 @@ function setupIpcHandlers() {
     const preferences = settingsStore.getPreferences();
     const adapterReachable = await isModAdapterReachable();
     const useModAdapterForThisRun =
-      preferences.useModAdapter || adapterReachable || isGeometryDashTarget(profile.target_app);
+      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(profile.target_app));
     if (useModAdapterForThisRun) {
       try {
         const modResult = await startModPlayback(profile);
@@ -1159,6 +1532,10 @@ function setupIpcHandlers() {
     if (result.success && shouldAutoTakeover()) {
       armAutoTakeoverHook();
     }
+    if (result.success) {
+      applyLifecycle('arm_replay', 'local_replay_start_ipc');
+      applyLifecycle('attempt_boundary', 'local_replay_live_ipc');
+    }
     if (!result.success) {
       broadcastStatus(
         IPC_CHANNELS.PLAYBACK_STATUS,
@@ -1168,16 +1545,17 @@ function setupIpcHandlers() {
     return result;
   });
 
-  ipcMain.handle(IPC_CHANNELS.PLAYBACK_STOP, async () => {
+  registerValidatedHandle(IPC_CHANNELS.PLAYBACK_STOP, isNoPayload, async () => {
     if (playbackViaMod && activeModBaseUrl) {
       return stopModPlayback();
     }
     disarmAutoTakeoverHook();
     lastPlaybackLeadInMs = 0;
+    applyLifecycle('stop_replay', 'local_replay_stop_ipc');
     return playbackEngine.stop();
   });
 
-  ipcMain.handle(IPC_CHANNELS.PLAYBACK_SELECT, async (_, payload: { profileId?: string | null }) => {
+  registerValidatedHandle(IPC_CHANNELS.PLAYBACK_SELECT, isProfileSelectPayload, async payload => {
     const profileId = payload?.profileId ?? null;
     if (!profileId) {
       return { success: false, error: 'Profile id missing' };
@@ -1192,14 +1570,14 @@ function setupIpcHandlers() {
     return { success: true };
   });
 
-  ipcMain.handle(IPC_CHANNELS.PLAYBACK_TAKEOVER, async () => {
+  registerValidatedHandle(IPC_CHANNELS.PLAYBACK_TAKEOVER, isNoPayload, async () => {
     return triggerTakeover();
   });
 
-  ipcMain.handle(IPC_CHANNELS.PROFILE_LIST, async () => profileStore.list());
-  ipcMain.handle(IPC_CHANNELS.PROFILE_GET, async (_, id: string) => profileStore.get(id));
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_LIST, isNoPayload, async () => profileStore.list());
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_GET, isString, async id => profileStore.get(id));
 
-  ipcMain.handle(IPC_CHANNELS.PROFILE_SAVE, async (_, profile: Profile) => {
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_SAVE, isProfilePayload, async profile => {
     try {
       const subscription = settingsStore.getSubscription();
       const saved = profileStore.save(profile, subscription);
@@ -1215,12 +1593,10 @@ function setupIpcHandlers() {
     }
   });
 
-  ipcMain.handle(
+  registerValidatedHandle(
     IPC_CHANNELS.PROFILE_SAVE_DRAFT,
-    async (
-      _,
-      payload: { name: string; notes: string; tags: string[]; autoTune?: Profile['auto_tune'] }
-    ) => {
+    isDraftSavePayload,
+    async payload => {
     try {
       const subscription = settingsStore.getSubscription();
       const draftProfile = profileStore.finalizeDraft(payload.name, payload.notes, payload.tags);
@@ -1232,7 +1608,7 @@ function setupIpcHandlers() {
           timing_adjustments: tuned.adjustments,
         };
       }
-      const saved = profileStore.save(draftProfile, subscription);
+      const saved = profileStore.create(draftProfile, subscription);
       profileStore.discardDraft();
       lastDraftProfile = null;
       draftQuickReplayPending = false;
@@ -1249,19 +1625,24 @@ function setupIpcHandlers() {
   }
   );
 
-  ipcMain.handle(IPC_CHANNELS.PROFILE_DISCARD_DRAFT, async () => {
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_DISCARD_DRAFT, isNoPayload, async () => {
     profileStore.discardDraft();
     lastDraftProfile = null;
     draftQuickReplayPending = false;
     return { success: true };
   });
 
-  ipcMain.handle(IPC_CHANNELS.PROFILE_DELETE, async (_, id: string) => {
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_DELETE, isString, async id => {
     profileStore.delete(id);
+    const subscription = settingsStore.getSubscription();
+    const preferences = settingsStore.getPreferences();
+    if (subscription.features.cloudSync && preferences.cloudSyncOptIn) {
+      void syncProfileDeleteToCloud(id);
+    }
     return { success: true };
   });
 
-  ipcMain.handle(IPC_CHANNELS.PROFILE_EXPORT, async (_, profileIds?: string[]) => {
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_EXPORT, isProfileIdList, async profileIds => {
     if (!mainWindow) return { success: false, error: 'Window missing' };
     const result = await dialog.showSaveDialog(mainWindow, {
       title: 'Export Profiles',
@@ -1272,7 +1653,7 @@ function setupIpcHandlers() {
     return { success: true, data: profileStore.exportProfiles(result.filePath, profileIds) };
   });
 
-  ipcMain.handle(IPC_CHANNELS.PROFILE_IMPORT, async () => {
+  registerValidatedHandle(IPC_CHANNELS.PROFILE_IMPORT, isNoPayload, async () => {
     if (!mainWindow) return { success: false, error: 'Window missing' };
     const result = await dialog.showOpenDialog(mainWindow, {
       title: 'Import Profiles',
@@ -1284,32 +1665,32 @@ function setupIpcHandlers() {
     return { success: true, data: imported };
   });
 
-  ipcMain.handle(IPC_CHANNELS.WINDOW_LIST, async () => windowManager.listWindows());
+  registerValidatedHandle(IPC_CHANNELS.WINDOW_LIST, isNoPayload, async () => windowManager.listWindowsForPicker());
 
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_GET, async () => ({
+  registerValidatedHandle(IPC_CHANNELS.SETTINGS_GET, isNoPayload, async () => ({
     preferences: settingsStore.getPreferences(),
     subscription: settingsStore.getSubscription(),
     eulaAccepted: settingsStore.hasAcceptedEula(),
   }));
 
-  ipcMain.handle(IPC_CHANNELS.SETTINGS_SET, async (_, preferences: Partial<UserPreferences>) => {
+  registerValidatedHandle(IPC_CHANNELS.SETTINGS_SET, isSettingsPayload, async preferences => {
     const updated = settingsStore.setPreferences(preferences);
     registerGlobalHotkeys(updated.hotkeys);
     return updated;
   });
 
-  ipcMain.handle(IPC_CHANNELS.SUBSCRIPTION_SET, async (_, subscription) => {
+  registerValidatedHandle(IPC_CHANNELS.SUBSCRIPTION_SET, isSubscriptionPayload, async subscription => {
     return settingsStore.setSubscription(subscription);
   });
 
-  ipcMain.handle(IPC_CHANNELS.SUBSCRIPTION_GET, async () => settingsStore.getSubscription());
+  registerValidatedHandle(IPC_CHANNELS.SUBSCRIPTION_GET, isNoPayload, async () => settingsStore.getSubscription());
 
-  ipcMain.handle(IPC_CHANNELS.EULA_ACCEPT, async (_, accepted: boolean) => {
+  registerValidatedHandle(IPC_CHANNELS.EULA_ACCEPT, isBooleanPayload, async accepted => {
     settingsStore.setEulaAccepted(accepted);
     return { success: true };
   });
 
-  ipcMain.handle(IPC_CHANNELS.BILLING_CHECKOUT, async (_, payload: { priceId: string }) => {
+  registerValidatedHandle(IPC_CHANNELS.BILLING_CHECKOUT, isBillingPayload, async payload => {
     const endpoint = process.env.CLICKSMITH_API_URL || 'http://127.0.0.1:3000';
     try {
       const response = await fetch(`${endpoint}/api/v1/billing/checkout`, {
@@ -1331,9 +1712,9 @@ function setupIpcHandlers() {
     }
   });
 
-  ipcMain.handle(IPC_CHANNELS.MODS_LIST, async () => modManager.listAdapters());
+  registerValidatedHandle(IPC_CHANNELS.MODS_LIST, isNoPayload, async () => modManager.listAdapters());
 
-  ipcMain.handle(IPC_CHANNELS.MODS_PROBE, async (_, payload: { id: string }) => {
+  registerValidatedHandle(IPC_CHANNELS.MODS_PROBE, isIdPayload, async payload => {
     const status = await modManager.probeAdapter(payload.id);
     if (!status) {
       return { success: false, error: 'Adapter not found' };
@@ -1341,19 +1722,36 @@ function setupIpcHandlers() {
     return { success: true, status };
   });
 
-  ipcMain.handle(IPC_CHANNELS.MODS_LAUNCH, async (_, payload: { id: string }) => {
+  registerValidatedHandle(IPC_CHANNELS.MODS_LAUNCH, isIdPayload, async payload => {
     return modManager.launchAdapter(payload.id);
   });
 
-  ipcMain.handle(IPC_CHANNELS.MODS_OPEN_DOC, async (_, payload: { id: string }) => {
+  registerValidatedHandle(IPC_CHANNELS.MODS_OPEN_DOC, isIdPayload, async payload => {
     return modManager.openInstallDoc(payload.id);
   });
 
-  ipcMain.handle(IPC_CHANNELS.MODS_OPEN_URL, async (_, payload: { url: string }) => {
+  registerValidatedHandle(IPC_CHANNELS.MODS_OPEN_URL, isUrlPayload, async payload => {
     return modManager.openDownloadUrl(payload.url);
   });
 
-  ipcMain.on('overlay:set-interactive', (_, interactive: boolean) => {
+  registerValidatedHandle(IPC_CHANNELS.AUTH_STATUS, isNoPayload, async () => ({
+    authenticated: false,
+    user: null,
+    provider: 'not_configured',
+  }));
+
+  registerValidatedHandle(IPC_CHANNELS.AUTH_LOGIN, isAuthLoginPayload, async payload => ({
+    success: false,
+    error: 'not_implemented',
+    email: payload.email,
+  }));
+
+  registerValidatedHandle(IPC_CHANNELS.AUTH_LOGOUT, isNoPayload, async () => ({ success: true }));
+
+  registerValidatedHandle(IPC_CHANNELS.APP_VERSION, isNoPayload, async () => app.getVersion());
+
+  ipcMain.on('overlay:set-interactive', (_, interactive: unknown) => {
+    if (typeof interactive !== 'boolean') return;
     if (!overlayWindow) return;
     overlayWindow.setIgnoreMouseEvents(!interactive, { forward: true });
   });
@@ -1393,7 +1791,8 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     }
 
     const adapterReachable = await isModAdapterReachable();
-    const useModAdapterForThisRun = preferences.useModAdapter || adapterReachable;
+    const useModAdapterForThisRun = adapterReachable && preferences.useModAdapter;
+    clearPendingDraftState();
     if (useModAdapterForThisRun) {
       const result = await startModRecording('screen').catch(() => null);
       if (result?.success) return;
@@ -1403,6 +1802,8 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
 
     currentRecordingTarget = 'screen';
     await recordingEngine.start(buildRecordingConfig({ target: 'screen' }));
+    applyLifecycle('arm_record', 'local_record_start_hotkey');
+    applyLifecycle('attempt_boundary', 'local_record_live_hotkey');
     mainWindow?.webContents.send(IPC_CHANNELS.RECORDING_STATUS, {
       state: recordingEngine.recording ? 'recording' : 'idle',
     });
@@ -1427,6 +1828,7 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     if (playbackEngine.playing) {
       disarmAutoTakeoverHook();
       lastPlaybackLeadInMs = 0;
+      applyLifecycle('stop_replay', 'local_replay_stop_hotkey');
       await playbackEngine.stop();
       return;
     }
@@ -1436,7 +1838,7 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       lastPlaybackProfile = draftProfile;
       lastPlaybackTarget = draftProfile.target_app;
       const useModAdapterForThisRun =
-        preferences.useModAdapter || adapterReachable || isGeometryDashTarget(draftProfile.target_app);
+        adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(draftProfile.target_app));
       if (useModAdapterForThisRun) {
         const modResult = await startModPlayback(draftProfile).catch((error: any) => ({
           success: false,
@@ -1460,6 +1862,10 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       if (result.success && shouldAutoTakeover()) {
         armAutoTakeoverHook();
       }
+      if (result.success) {
+        applyLifecycle('arm_replay', 'local_replay_start_hotkey_draft');
+        applyLifecycle('attempt_boundary', 'local_replay_live_hotkey_draft');
+      }
       return;
     }
 
@@ -1475,7 +1881,7 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     if (!profile) return;
     lastPlaybackProfile = profile;
     const useModAdapterForThisRun =
-      preferences.useModAdapter || adapterReachable || isGeometryDashTarget(profile.target_app);
+      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(profile.target_app));
     if (useModAdapterForThisRun) {
       const modResult = await startModPlayback(profile).catch((error: any) => ({
         success: false,
@@ -1500,6 +1906,10 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     );
     if (result.success && shouldAutoTakeover()) {
       armAutoTakeoverHook();
+    }
+    if (result.success) {
+      applyLifecycle('arm_replay', 'local_replay_start_hotkey_profile');
+      applyLifecycle('attempt_boundary', 'local_replay_live_hotkey_profile');
     }
   });
 
@@ -1530,7 +1940,7 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     const preferences = settingsStore.getPreferences();
     const adapterReachable = await isModAdapterReachable();
     const useModAdapterForThisRun =
-      preferences.useModAdapter || adapterReachable || isGeometryDashTarget(profile.target_app);
+      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(profile.target_app));
     if (useModAdapterForThisRun) {
       const modResult = await startModPlayback(profile).catch((error: any) => ({
         success: false,
@@ -1555,6 +1965,10 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     if (result.success && shouldAutoTakeover()) {
       armAutoTakeoverHook();
     }
+    if (result.success) {
+      applyLifecycle('arm_replay', 'local_replay_start_quick');
+      applyLifecycle('attempt_boundary', 'local_replay_live_quick');
+    }
   });
 
   globalShortcut.register(hotkeys.openOverlay, () => {
@@ -1567,39 +1981,72 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
   });
 }
 
-recordingEngine.on('status', status => broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, status));
-playbackEngine.on('status', status => broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, status));
-playbackEngine.on('complete', status => {
-  disarmAutoTakeoverHook();
-  if (lastPlaybackProfile) {
-    const createdAt = new Date().toISOString();
-    profileStore.saveDraft({
-      target_app: lastPlaybackProfile.target_app,
-      events: lastPlaybackProfile.events,
-      success_metric: lastPlaybackProfile.success_metric,
-      created_at: createdAt,
-      version: lastPlaybackProfile.version + 1,
-      metadata: {
-        created_at: lastPlaybackProfile.created_at,
-        updated_at: createdAt,
-        version: lastPlaybackProfile.version + 1,
-        total_duration_ms: lastPlaybackProfile.metadata?.total_duration_ms ?? 0,
-        event_count: lastPlaybackProfile.events.length,
-        override_count: lastPlaybackProfile.events.filter(event => event.human_override).length,
-        tags: lastPlaybackProfile.metadata?.tags ?? [],
-        custom: {
-          ...(lastPlaybackProfile.metadata?.custom ?? {}),
-          parent_id: lastPlaybackProfile.id,
-        },
-      },
-    });
-    broadcastStatus(IPC_CHANNELS.RUN_COMPLETE, {
-      source: 'playback',
-      draft: profileStore.getDraft(),
-      status,
-    });
-    return;
+recordingEngine.on('status', status => {
+  if (status.state === 'paused') {
+    applyLifecycle('pause', 'recording_engine_paused');
+  } else if (lastRecordingEngineState === 'paused' && status.state === 'recording') {
+    applyLifecycle('unpause', 'recording_engine_resumed');
   }
+
+  if (status.state === 'idle' && (lastRecordingEngineState === 'recording' || lastRecordingEngineState === 'stopping')) {
+    const snapshot = runLifecycle.getSnapshot();
+    if (snapshot.state === 'record_live' || snapshot.state === 'takeover_live' || snapshot.state === 'finalizing') {
+      applyLifecycle('stop_record', 'recording_engine_idle');
+      applyLifecycle('finalize_done', 'recording_engine_idle_finalize');
+    }
+  }
+
+  lastRecordingEngineState = status.state;
+  broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, status);
+});
+
+playbackEngine.on('status', status => {
+  if (status.state === 'paused') {
+    applyLifecycle('pause', 'playback_engine_paused');
+  } else if (lastPlaybackEngineState === 'paused' && status.state === 'playing') {
+    applyLifecycle('unpause', 'playback_engine_resumed');
+  }
+
+  if (status.state === 'idle' && (lastPlaybackEngineState === 'playing' || lastPlaybackEngineState === 'paused')) {
+    applyLifecycle('stop_replay', 'playback_engine_idle');
+  }
+
+  if (status.state === 'playing') {
+    const snapshot = runLifecycle.getSnapshot();
+    const runChanged = lastLoggedDispatchRunId !== snapshot.runId || lastLoggedDispatchAttempt !== snapshot.attemptId;
+    if (runChanged) {
+      lastLoggedDispatchRunId = snapshot.runId;
+      lastLoggedDispatchAttempt = snapshot.attemptId;
+      lastLoggedDispatchIndex = -1;
+    }
+    if (status.currentEventIndex >= 0 && status.currentEventIndex !== lastLoggedDispatchIndex) {
+      const actualMs = Math.max(0, status.elapsedMs);
+      const deltaMs = status.timingDrift;
+      const scheduledMs = Math.max(0, actualMs - deltaMs);
+      runTrace.logDispatch({
+        runId: snapshot.runId,
+        attemptId: snapshot.attemptId,
+        eventIndex: status.currentEventIndex,
+        scheduledMs,
+        actualMs,
+        deltaMs,
+        action: 'playback_event',
+      });
+      lastLoggedDispatchIndex = status.currentEventIndex;
+    }
+  }
+
+  lastPlaybackEngineState = status.state;
+  broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, status);
+});
+playbackEngine.on('dispatch', (payload: { actionType?: string }) => {
+  if (payload?.actionType === 'mouseDown') {
+    autoTakeoverSuppressUntilMs = Date.now() + AUTO_TAKEOVER_SUPPRESS_WINDOW_MS;
+  }
+});
+playbackEngine.on('complete', status => {
+  applyLifecycle('stop_replay', 'playback_engine_complete');
+  disarmAutoTakeoverHook();
   broadcastStatus(IPC_CHANNELS.RUN_COMPLETE, { source: 'playback', status });
 });
 
@@ -1627,5 +2074,6 @@ app.on('window-all-closed', () => {
 });
 
 app.on('will-quit', () => {
+  recordingEngine.dispose();
   globalShortcut.unregisterAll();
 });

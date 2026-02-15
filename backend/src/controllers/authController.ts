@@ -1,15 +1,12 @@
 import { Request, Response } from 'express';
 import { auth } from '../config/firebase';
+import { requireAuthenticatedUid } from '../middleware/auth';
 import { mockDb } from '../store/mockDb';
 import { SubscriptionRecord, UserRecord } from '../types';
 
-function getUserId(req: Request) {
-  return (req.headers['x-user-id'] as string) || 'mock-user';
-}
-
 export const signup = async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body as { email: string; password: string };
 
     if (auth) {
       const user = await auth.createUser({ email, password });
@@ -21,15 +18,15 @@ export const signup = async (req: Request, res: Response) => {
     const userId = `mock-${Date.now()}`;
     const record: UserRecord = { uid: userId, email, createdAt: new Date().toISOString() };
     mockDb.createUser(record);
-    res.status(201).json({ message: 'User created successfully', userId });
-  } catch (error) {
+    res.status(201).json({ message: 'User created successfully', userId, token: `dev:${userId}` });
+  } catch {
     res.status(500).json({ error: 'Error creating user' });
   }
 };
 
 export const login = async (req: Request, res: Response) => {
   try {
-    const { email } = req.body;
+    const { email } = req.body as { email: string };
     if (auth) {
       const user = await auth.getUserByEmail(email);
       const token = await auth.createCustomToken(user.uid);
@@ -37,14 +34,21 @@ export const login = async (req: Request, res: Response) => {
       return;
     }
 
-    res.status(200).json({ token: 'mock-jwt-token', userId: getUserId(req) });
-  } catch (error) {
+    const knownUser = mockDb.findUserByEmail(email);
+    if (!knownUser) {
+      res.status(401).json({ error: 'Invalid credentials' });
+      return;
+    }
+
+    res.status(200).json({ token: `dev:${knownUser.uid}`, userId: knownUser.uid });
+  } catch {
     res.status(401).json({ error: 'Invalid credentials' });
   }
 };
 
 export const getProfile = async (req: Request, res: Response) => {
-  const uid = getUserId(req);
+  const uid = requireAuthenticatedUid(req);
+  const user = mockDb.getUser(uid);
   const subscription =
     mockDb.getSubscription(uid) ??
     ({
@@ -56,7 +60,7 @@ export const getProfile = async (req: Request, res: Response) => {
 
   res.json({
     uid,
-    email: req.query.email ?? 'user@example.com',
+    email: user?.email ?? req.query.email ?? 'user@example.com',
     subscription,
   });
 };

@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -28,8 +30,9 @@ using namespace geode::prelude;
 
 namespace {
 constexpr int kStatusPort = 27737;
-// Allow tiny scheduling slack to avoid one-frame late dispatch jitter.
-constexpr double kMsEpsilon = 1.0;
+constexpr double kTickHz = 240.0;
+constexpr double kTickMs = 1000.0 / kTickHz;
+constexpr double kTakeoverPauseGuardMs = 700.0;
 
 #ifdef _WIN32
 using SocketHandle = SOCKET;
@@ -41,6 +44,7 @@ const SocketHandle kInvalidSocket = -1;
 
 struct MacroEvent {
   double t_ms = 0.0;
+  std::int64_t t_tick = 0;
   PlayerButton button = PlayerButton::Jump;
   bool down = false;
   bool player2 = false;
@@ -52,11 +56,45 @@ struct MacroData {
   double start_ms = 0.0;
 };
 
+struct ReplayDispatchSample {
+  std::size_t event_index = 0;
+  std::int64_t scheduled_tick = 0;
+  std::int64_t actual_tick = 0;
+  std::int64_t delta_tick = 0;
+  double scheduled_ms = 0.0;
+  double actual_ms = 0.0;
+  double delta_ms = 0.0;
+};
+
+enum class ReplayState {
+  Idle = 0,
+  Armed = 1,
+  Live = 2,
+  Paused = 3,
+};
+
+enum class RecordState {
+  Idle = 0,
+  Armed = 1,
+  Live = 2,
+};
+
 std::mutex gMacroMutex;
 std::vector<MacroEvent> gRecordingEvents;
 MacroData gLastMacro;
 std::vector<MacroEvent> gPendingReplayEvents;
 std::vector<MacroEvent> gReplayEvents;
+
+std::atomic<ReplayState> gReplayState{ReplayState::Idle};
+std::atomic<RecordState> gRecordState{RecordState::Idle};
+std::atomic<std::uint64_t> gTransitionSeq{0};
+std::mutex gTransitionMutex;
+std::vector<matjson::Value> gTransitionLog;
+constexpr std::size_t kTransitionLogLimit = 200;
+std::mutex gReplayTelemetryMutex;
+std::vector<ReplayDispatchSample> gReplayDispatchSamples;
+constexpr std::size_t kReplayTelemetryLimit = 512;
+std::atomic<std::uint64_t> gReplayRunId{0};
 
 std::atomic<bool> gRecordArmed{false};
 std::atomic<bool> gTakeoverArmed{false};
@@ -64,11 +102,11 @@ std::atomic<bool> gRecordActive{false};
 std::atomic<bool> gRecordStopRequested{false};
 std::atomic<bool> gRecordComplete{false};
 
-std::atomic<bool> gReplayRequested{false};
 std::atomic<bool> gReplayActive{false};
 std::atomic<bool> gReplayStopRequested{false};
 std::atomic<bool> gReplayArmed{false};
 std::atomic<bool> gReplayDispatching{false};
+std::atomic<bool> gReplaySessionActive{false};
 
 PlayLayer* gActivePlayLayer = nullptr;
 bool gInLevel = false;
@@ -76,19 +114,105 @@ bool gButtonDown[2][3] = {{false, false, false}, {false, false, false}};
 
 // These are only accessed on the game thread.
 double gGameTimeMs = 0.0;
-double gRecordStartMs = 0.0;
-double gReplayStartMs = 0.0;
+double gGameRemainderMs = 0.0;
+std::int64_t gGameTick = 0;
+std::int64_t gRecordStartTick = 0;
+std::int64_t gReplayStartTick = 0;
 std::size_t gReplayIndex = 0;
 bool gRecordFromTakeover = false;
-double gTakeoverStartMs = 0.0;
-std::chrono::steady_clock::time_point gLastAttemptBoundaryAt = std::chrono::steady_clock::time_point::min();
+std::int64_t gTakeoverStartTick = 0;
 bool gAttemptBoundaryPending = false;
+std::int64_t gAttemptSerial = 0;
+std::int64_t gReplayStartBoundarySerial = 0;
 bool gWasPaused = false;
 double gPauseStartedGameMs = 0.0;
+bool gIgnoreNextTakeoverInput = false;
+double gTakeoverInputIgnoreUntilMs = 0.0;
+bool gReplayWasActiveBeforePause = false;
+bool gBlockTakeoverUntilReplayDispatch = false;
+bool gSkipNextDtAfterUnpause = false;
+std::int64_t gReplayPhaseTicks = 0;
 
 void startRecording();
 void stopReplay();
 void startReplay();
+
+std::uint64_t unixNowMs() {
+  using namespace std::chrono;
+  return duration_cast<milliseconds>(system_clock::now().time_since_epoch()).count();
+}
+
+const char* replayStateToString(ReplayState value) {
+  switch (value) {
+    case ReplayState::Armed:
+      return "armed";
+    case ReplayState::Live:
+      return "live";
+    case ReplayState::Paused:
+      return "paused";
+    default:
+      return "idle";
+  }
+}
+
+const char* recordStateToString(RecordState value) {
+  switch (value) {
+    case RecordState::Armed:
+      return "armed";
+    case RecordState::Live:
+      return "live";
+    default:
+      return "idle";
+  }
+}
+
+void appendTransition(const char* domain, const char* from, const char* to, const char* reason) {
+  auto entry = matjson::Value::object();
+  entry["seq"] = static_cast<double>(gTransitionSeq.fetch_add(1) + 1);
+  entry["ts_ms"] = static_cast<double>(unixNowMs());
+  entry["game_ms"] = gGameTimeMs;
+  entry["game_tick"] = static_cast<double>(gGameTick);
+  entry["domain"] = domain;
+  entry["from"] = from;
+  entry["to"] = to;
+  entry["reason"] = reason;
+  entry["in_level"] = gInLevel;
+  entry["paused"] = gActivePlayLayer && gActivePlayLayer->m_isPaused;
+
+  std::lock_guard<std::mutex> lock(gTransitionMutex);
+  gTransitionLog.push_back(entry);
+  if (gTransitionLog.size() > kTransitionLogLimit) {
+    const auto trim = gTransitionLog.size() - kTransitionLogLimit;
+    gTransitionLog.erase(gTransitionLog.begin(), gTransitionLog.begin() + static_cast<std::ptrdiff_t>(trim));
+  }
+}
+
+void setReplayState(ReplayState next, const char* reason) {
+  const ReplayState prev = gReplayState.exchange(next);
+  if (prev == next) return;
+  appendTransition("replay_state", replayStateToString(prev), replayStateToString(next), reason);
+}
+
+void setRecordState(RecordState next, const char* reason) {
+  const RecordState prev = gRecordState.exchange(next);
+  if (prev == next) return;
+  appendTransition("record_state", recordStateToString(prev), recordStateToString(next), reason);
+}
+
+double snapToTick(double ms) {
+  if (ms <= 0.0) return 0.0;
+  return std::round(ms / kTickMs) * kTickMs;
+}
+
+std::int64_t msToTick(double ms) {
+  if (!std::isfinite(ms) || ms <= 0.0) return 0;
+  return static_cast<std::int64_t>(std::llround(ms / kTickMs));
+}
+
+double tickToMs(std::int64_t tick) {
+  if (tick <= 0) return 0.0;
+  return static_cast<double>(tick) * kTickMs;
+}
 
 void closeSocket(SocketHandle handle) {
 #ifdef _WIN32
@@ -164,20 +288,95 @@ std::string buildStatusPayload() {
   payload["id"] = "geode-geometry-dash";
   payload["name"] = "Clicksmith Geode Adapter";
   payload["game"] = "Geometry Dash";
-  payload["version"] = "0.2.0";
+  payload["version"] = "0.2.5";
+  payload["protocol_version"] = "1.0.0";
+  payload["timing_domain"] = "tick";
+  payload["boundary_policy"] = "attempt_boundary_only";
+  payload["pause_policy"] = "freeze_no_dispatch";
+  payload["takeover_policy"] = "replay_live_press_edge_only";
   auto caps = matjson::Value::array();
   caps.push("status");
   caps.push("record");
   caps.push("replay");
   payload["capabilities"] = caps;
   payload["tick_hz"] = 240;
+  payload["game_tick"] = static_cast<double>(gGameTick);
+  payload["replay_index"] = static_cast<double>(gReplayIndex);
+  payload["attempt_serial"] = static_cast<double>(gAttemptSerial);
+  payload["replay_run_id"] = static_cast<double>(gReplayRunId.load());
+  payload["replay_phase_ticks"] = static_cast<double>(gReplayPhaseTicks);
   payload["record_active"] = gRecordActive.load();
   payload["record_armed"] = gRecordArmed.load();
   payload["record_complete"] = gRecordComplete.load();
+  payload["record_state"] = recordStateToString(gRecordState.load());
   payload["replay_active"] = gReplayActive.load();
   payload["replay_armed"] = gReplayArmed.load();
-  payload["replay_requested"] = gReplayRequested.load();
+  payload["replay_requested"] = gReplaySessionActive.load();
+  payload["replay_state"] = replayStateToString(gReplayState.load());
+  payload["paused"] = gActivePlayLayer && gActivePlayLayer->m_isPaused;
   payload["takeover_armed"] = gTakeoverArmed.load();
+  return payload.dump(matjson::NO_INDENTATION);
+}
+
+std::string buildTransitionsPayload() {
+  auto payload = matjson::Value::object();
+  payload["ok"] = true;
+  auto transitions = matjson::Value::array();
+  {
+    std::lock_guard<std::mutex> lock(gTransitionMutex);
+    for (const auto& entry : gTransitionLog) {
+      transitions.push(entry);
+    }
+  }
+  payload["transitions"] = transitions;
+  return payload.dump(matjson::NO_INDENTATION);
+}
+
+void clearReplayTelemetry() {
+  std::lock_guard<std::mutex> lock(gReplayTelemetryMutex);
+  gReplayDispatchSamples.clear();
+}
+
+void appendReplayDispatchSample(std::size_t eventIndex, const MacroEvent& event, std::int64_t actualTick) {
+  ReplayDispatchSample sample;
+  sample.event_index = eventIndex;
+  sample.scheduled_tick = event.t_tick;
+  sample.actual_tick = actualTick;
+  sample.delta_tick = actualTick - event.t_tick;
+  sample.scheduled_ms = tickToMs(event.t_tick);
+  sample.actual_ms = tickToMs(actualTick);
+  sample.delta_ms = sample.actual_ms - sample.scheduled_ms;
+
+  std::lock_guard<std::mutex> lock(gReplayTelemetryMutex);
+  if (gReplayDispatchSamples.size() >= kReplayTelemetryLimit) {
+    gReplayDispatchSamples.erase(gReplayDispatchSamples.begin());
+  }
+  gReplayDispatchSamples.push_back(sample);
+}
+
+std::string buildReplayTelemetryPayload() {
+  auto payload = matjson::Value::object();
+  payload["ok"] = true;
+  payload["run_id"] = static_cast<double>(gReplayRunId.load());
+  payload["replay_phase_ticks"] = static_cast<double>(gReplayPhaseTicks);
+  payload["attempt_serial"] = static_cast<double>(gAttemptSerial);
+  auto samples = matjson::Value::array();
+  {
+    std::lock_guard<std::mutex> lock(gReplayTelemetryMutex);
+    for (const auto& sample : gReplayDispatchSamples) {
+      auto entry = matjson::Value::object();
+      entry["event_index"] = static_cast<double>(sample.event_index);
+      entry["scheduled_tick"] = static_cast<double>(sample.scheduled_tick);
+      entry["actual_tick"] = static_cast<double>(sample.actual_tick);
+      entry["delta_tick"] = static_cast<double>(sample.delta_tick);
+      entry["scheduled_ms"] = sample.scheduled_ms;
+      entry["actual_ms"] = sample.actual_ms;
+      entry["delta_ms"] = sample.delta_ms;
+      samples.push(entry);
+    }
+  }
+  payload["samples"] = samples;
+  payload["count"] = static_cast<double>(samples.size());
   return payload.dump(matjson::NO_INDENTATION);
 }
 
@@ -358,6 +557,8 @@ bool parseEventsFromJson(const matjson::Value& root, std::vector<MacroEvent>& ou
     if (event.t_ms < 0.0) {
       event.t_ms = 0.0;
     }
+    event.t_ms = snapToTick(event.t_ms);
+    event.t_tick = msToTick(event.t_ms);
     auto downRes = item["down"].asBool();
     if (downRes.isOk()) {
       event.down = downRes.unwrap();
@@ -379,6 +580,7 @@ bool parseEventsFromJson(const matjson::Value& root, std::vector<MacroEvent>& ou
   }
 
   std::sort(outEvents.begin(), outEvents.end(), [](const MacroEvent& a, const MacroEvent& b) {
+    if (a.t_tick != b.t_tick) return a.t_tick < b.t_tick;
     if (a.t_ms != b.t_ms) return a.t_ms < b.t_ms;
     return a.down && !b.down;
   });
@@ -388,6 +590,7 @@ bool parseEventsFromJson(const matjson::Value& root, std::vector<MacroEvent>& ou
 
 HttpResponse handleRecordStart() {
   if (gRecordActive.load()) {
+    setRecordState(RecordState::Live, "record_start_while_live");
     auto payload = matjson::Value::object();
     payload["ok"] = true;
     payload["state"] = "recording";
@@ -399,7 +602,8 @@ HttpResponse handleRecordStart() {
   gRecordStopRequested.store(false);
   gRecordComplete.store(false);
   gRecordFromTakeover = false;
-  gTakeoverStartMs = 0.0;
+  gTakeoverStartTick = 0;
+  setRecordState(RecordState::Armed, "record_start_armed");
   auto payload = matjson::Value::object();
   payload["ok"] = true;
   payload["state"] = "armed";
@@ -415,13 +619,14 @@ HttpResponse handleRecordStop() {
     gRecordArmed.store(false);
     gTakeoverArmed.store(false);
     gRecordFromTakeover = false;
-    gTakeoverStartMs = 0.0;
+    gTakeoverStartTick = 0;
     MacroData snapshot;
     {
       std::lock_guard<std::mutex> lock(gMacroMutex);
       gRecordingEvents.clear();
       gLastMacro = snapshot;
     }
+    setRecordState(RecordState::Idle, "record_stop_disarmed_without_live");
     auto payload = matjson::Value::object();
     payload["ok"] = true;
     payload["duration_ms"] = snapshot.duration_ms;
@@ -445,8 +650,8 @@ HttpResponse handleRecordStop() {
   if (!completed) {
     std::lock_guard<std::mutex> lock(gMacroMutex);
     snapshot.events = gRecordingEvents;
-    snapshot.duration_ms = std::max(0.0, gGameTimeMs - gRecordStartMs);
-    snapshot.start_ms = gRecordFromTakeover ? gTakeoverStartMs : gRecordStartMs;
+    snapshot.duration_ms = tickToMs(std::max<std::int64_t>(0, gGameTick - gRecordStartTick));
+    snapshot.start_ms = gRecordFromTakeover ? tickToMs(gTakeoverStartTick) : tickToMs(gRecordStartTick);
     gLastMacro = snapshot;
     gRecordingEvents.clear();
     gRecordActive.store(false);
@@ -454,11 +659,13 @@ HttpResponse handleRecordStop() {
     gTakeoverArmed.store(false);
     gRecordComplete.store(false);
     gRecordFromTakeover = false;
-    gTakeoverStartMs = 0.0;
+    gTakeoverStartTick = 0;
+    setRecordState(RecordState::Idle, "record_stop_timeout_finalize");
   } else {
     std::lock_guard<std::mutex> lock(gMacroMutex);
     snapshot = gLastMacro;
     gRecordComplete.store(false);
+    setRecordState(RecordState::Idle, "record_stop_complete_finalize");
   }
 
   auto payload = matjson::Value::object();
@@ -503,14 +710,21 @@ HttpResponse handleReplayStart(const HttpRequest& request) {
 
   // Clear any stale replay state before arming a new replay.
   stopReplay();
+  // Replay start must clear standalone recording arm state so pause/resume
+  // interactions cannot switch into recording via stale F9 arm.
+  gRecordArmed.store(false);
+  gRecordStopRequested.store(false);
+  gRecordComplete.store(false);
 
   {
     std::lock_guard<std::mutex> lock(gMacroMutex);
     gPendingReplayEvents = std::move(events);
   }
-  gReplayRequested.store(false);
   gReplayStopRequested.store(false);
   gReplayArmed.store(true);
+  gReplayStartBoundarySerial = gAttemptSerial + (gAttemptBoundaryPending ? 0 : 1);
+  clearReplayTelemetry();
+  setReplayState(ReplayState::Armed, "replay_start_armed");
 
   auto payload = matjson::Value::object();
   payload["ok"] = true;
@@ -538,18 +752,17 @@ HttpResponse handleReplayTakeover(const HttpRequest& request) {
     if (!gReplayActive.load()) {
       return {400, buildErrorPayload("not_replaying")};
     }
-    double takeoverStartMs =
-      gReplayActive.load() ? std::max(0.0, gGameTimeMs - gReplayStartMs) : std::max(0.0, gGameTimeMs);
+    std::int64_t takeoverStartTick =
+      gReplayActive.load() ? std::max<std::int64_t>(0, gGameTick - gReplayStartTick) : std::max<std::int64_t>(0, gGameTick);
     if (!gReplayEvents.empty()) {
-      const double maxReplayMs = std::max(0.0, gReplayEvents.back().t_ms);
-      takeoverStartMs = std::clamp(takeoverStartMs, 0.0, maxReplayMs);
+      const auto maxReplayTick = std::max<std::int64_t>(0, gReplayEvents.back().t_tick);
+      takeoverStartTick = std::clamp(takeoverStartTick, static_cast<std::int64_t>(0), maxReplayTick);
     }
-    gReplayRequested.store(false);
     gReplayStopRequested.store(false);
     stopReplay();
     startRecording();
     gRecordFromTakeover = true;
-    gTakeoverStartMs = takeoverStartMs;
+    gTakeoverStartTick = takeoverStartTick;
     auto payload = matjson::Value::object();
     payload["ok"] = true;
     payload["state"] = "recording";
@@ -557,7 +770,7 @@ HttpResponse handleReplayTakeover(const HttpRequest& request) {
     return {200, payload.dump(matjson::NO_INDENTATION)};
   }
 
-  if (!gReplayActive.load() && !gReplayRequested.load() && !gReplayArmed.load()) {
+  if (!gReplayActive.load() && !gReplayArmed.load()) {
     return {400, buildErrorPayload("not_replaying")};
   }
 
@@ -565,7 +778,7 @@ HttpResponse handleReplayTakeover(const HttpRequest& request) {
   gRecordArmed.store(false);
   gRecordStopRequested.store(false);
   gRecordComplete.store(false);
-  gRecordStartMs = gGameTimeMs;
+  gRecordStartTick = gGameTick;
   auto payload = matjson::Value::object();
   payload["ok"] = true;
   payload["state"] = "takeover_armed";
@@ -574,8 +787,10 @@ HttpResponse handleReplayTakeover(const HttpRequest& request) {
 
 HttpResponse handleReplayStop() {
   gReplayArmed.store(false);
-  gReplayRequested.store(false);
   gReplayStopRequested.store(true);
+  if (!gReplayActive.load() && !gReplaySessionActive.load()) {
+    setReplayState(ReplayState::Idle, "replay_stop_when_not_live");
+  }
   auto payload = matjson::Value::object();
   payload["ok"] = true;
   payload["state"] = "stopped";
@@ -585,6 +800,12 @@ HttpResponse handleReplayStop() {
 HttpResponse routeRequest(const HttpRequest& request) {
   if (request.method == "GET" && request.path == "/status") {
     return {200, buildStatusPayload()};
+  }
+  if (request.method == "GET" && request.path == "/debug/transitions") {
+    return {200, buildTransitionsPayload()};
+  }
+  if (request.method == "GET" && request.path == "/debug/replay-telemetry") {
+    return {200, buildReplayTelemetryPayload()};
   }
   if (request.method == "POST" && request.path == "/record/start") {
     return handleRecordStart();
@@ -733,7 +954,8 @@ std::unique_ptr<AdapterServer> gServer;
 void recordEvent(PlayerButton button, bool down, bool player2) {
   if (!gRecordActive.load() || gReplayActive.load() || !gInLevel) return;
   MacroEvent event;
-  event.t_ms = std::max(0.0, gGameTimeMs - gRecordStartMs);
+  event.t_tick = std::max<std::int64_t>(0, gGameTick - gRecordStartTick);
+  event.t_ms = tickToMs(event.t_tick);
   event.button = button;
   event.down = down;
   event.player2 = player2;
@@ -742,7 +964,16 @@ void recordEvent(PlayerButton button, bool down, bool player2) {
 
 void startRecordingIfArmed(bool replayInput, PlayerButton button, bool down, bool player2) {
   if (gRecordActive.load() || !gInLevel) return;
-  if (gActivePlayLayer && gActivePlayLayer->m_isPaused) return;
+  if (gActivePlayLayer && gActivePlayLayer->m_isPaused) {
+    // Pause/menu input paths must never preserve takeover arm state.
+    if (gTakeoverArmed.load()) {
+      gTakeoverArmed.store(false);
+    }
+    gIgnoreNextTakeoverInput = true;
+    gTakeoverInputIgnoreUntilMs =
+      std::max(gTakeoverInputIgnoreUntilMs, gGameTimeMs + kTakeoverPauseGuardMs);
+    return;
+  }
   if (gActivePlayLayer && gActivePlayLayer->m_hasCompletedLevel) {
     gTakeoverArmed.store(false);
     gRecordArmed.store(false);
@@ -752,6 +983,12 @@ void startRecordingIfArmed(bool replayInput, PlayerButton button, bool down, boo
   const bool recordArmed = gRecordArmed.load();
   if (!takeoverArmed && !recordArmed) return;
 
+  // Replay/takeover path owns input while replay is active/armed. Never allow
+  // stale standalone record-arm to start recording in replay context.
+  if (recordArmed && (gReplayActive.load() || gReplayArmed.load() || takeoverArmed)) {
+    return;
+  }
+
   if (takeoverArmed) {
     // Takeover is valid only while replay is actively running.
     // If replay already ended (death/reset/stop), disarm takeover to avoid
@@ -760,16 +997,30 @@ void startRecordingIfArmed(bool replayInput, PlayerButton button, bool down, boo
       gTakeoverArmed.store(false);
       return;
     }
+    // Takeover must be an intentional press edge; never trigger on release.
+    if (!down) {
+      return;
+    }
+    if (!replayInput && gGameTimeMs <= gTakeoverInputIgnoreUntilMs) {
+      return;
+    }
+    if (gIgnoreNextTakeoverInput && !replayInput) {
+      gIgnoreNextTakeoverInput = false;
+      return;
+    }
+    if (!replayInput && gBlockTakeoverUntilReplayDispatch) {
+      return;
+    }
     if (replayInput) return;
-    double takeoverStartMs = std::max(0.0, gGameTimeMs - gReplayStartMs);
+    std::int64_t takeoverStartTick = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
     if (!gReplayEvents.empty()) {
-      const double maxReplayMs = std::max(0.0, gReplayEvents.back().t_ms);
-      takeoverStartMs = std::clamp(takeoverStartMs, 0.0, maxReplayMs);
+      const auto maxReplayTick = std::max<std::int64_t>(0, gReplayEvents.back().t_tick);
+      takeoverStartTick = std::clamp(takeoverStartTick, static_cast<std::int64_t>(0), maxReplayTick);
     }
     stopReplay();
     startRecording();
     gRecordFromTakeover = true;
-    gTakeoverStartMs = takeoverStartMs;
+    gTakeoverStartTick = takeoverStartTick;
     // The takeover trigger edge must be part of segment B. Pre-seed the
     // per-button state so the current edge is emitted by updateButtonState.
     const int p = player2 ? 1 : 0;
@@ -796,14 +1047,17 @@ void startRecording() {
   gRecordArmed.store(false);
   gTakeoverArmed.store(false);
   gRecordFromTakeover = false;
-  gTakeoverStartMs = 0.0;
+  gTakeoverStartTick = 0;
+  gIgnoreNextTakeoverInput = false;
+  gTakeoverInputIgnoreUntilMs = 0.0;
   gButtonDown[0][0] = gButtonDown[0][1] = gButtonDown[0][2] = false;
   gButtonDown[1][0] = gButtonDown[1][1] = gButtonDown[1][2] = false;
   std::lock_guard<std::mutex> lock(gMacroMutex);
   gRecordingEvents.clear();
-  gRecordStartMs = gGameTimeMs;
+  gRecordStartTick = gGameTick;
   gRecordActive.store(true);
   gRecordComplete.store(false);
+  setRecordState(RecordState::Live, "record_start_live");
 }
 
 void stopRecording() {
@@ -811,33 +1065,75 @@ void stopRecording() {
   {
     std::lock_guard<std::mutex> lock(gMacroMutex);
     snapshot.events = gRecordingEvents;
-    snapshot.duration_ms = std::max(0.0, gGameTimeMs - gRecordStartMs);
-    snapshot.start_ms = gRecordFromTakeover ? gTakeoverStartMs : gRecordStartMs;
+    snapshot.duration_ms = tickToMs(std::max<std::int64_t>(0, gGameTick - gRecordStartTick));
+    snapshot.start_ms = gRecordFromTakeover ? tickToMs(gTakeoverStartTick) : tickToMs(gRecordStartTick);
     gLastMacro = snapshot;
     gRecordingEvents.clear();
   }
   gRecordActive.store(false);
   gRecordComplete.store(true);
   gRecordFromTakeover = false;
-  gTakeoverStartMs = 0.0;
+  gTakeoverStartTick = 0;
+  setRecordState(RecordState::Idle, "record_live_stopped");
 }
 
 void startReplay() {
   std::lock_guard<std::mutex> lock(gMacroMutex);
   gReplayEvents = gPendingReplayEvents;
+  for (auto& event : gReplayEvents) {
+    event.t_ms = snapToTick(std::max(0.0, event.t_ms));
+    event.t_tick = msToTick(event.t_ms);
+  }
+  std::sort(gReplayEvents.begin(), gReplayEvents.end(), [](const MacroEvent& a, const MacroEvent& b) {
+    if (a.t_tick != b.t_tick) return a.t_tick < b.t_tick;
+    if (a.t_ms != b.t_ms) return a.t_ms < b.t_ms;
+    return a.down && !b.down;
+  });
+  gReplayRunId.fetch_add(1);
+  clearReplayTelemetry();
   gReplayIndex = 0;
-  gReplayStartMs = gGameTimeMs;
+  gReplayStartTick = gGameTick + gReplayPhaseTicks;
+  gIgnoreNextTakeoverInput = false;
+  gBlockTakeoverUntilReplayDispatch = false;
+  gReplayWasActiveBeforePause = false;
   // Replay arm is one-shot: it should be consumed when replay actually begins.
   gReplayArmed.store(false);
-  gReplayActive.store(!gReplayEvents.empty());
+  const bool hasEvents = !gReplayEvents.empty();
+  gReplayActive.store(hasEvents);
+  gReplaySessionActive.store(hasEvents);
+  setReplayState(hasEvents ? ReplayState::Live : ReplayState::Idle, "replay_start_live");
+
+  // Phase-lock: dispatch all t_tick <= 0 events immediately at start so run
+  // alignment does not depend on the first post-boundary update frame.
+  const std::int64_t startElapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
+  while (hasEvents && gReplayIndex < gReplayEvents.size()) {
+    const auto& event = gReplayEvents[gReplayIndex];
+    if (event.t_tick > startElapsedTicks) break;
+    dispatchReplayEvent(event);
+    appendReplayDispatchSample(gReplayIndex, event, startElapsedTicks);
+    gBlockTakeoverUntilReplayDispatch = false;
+    gReplayIndex += 1;
+  }
+  if (hasEvents && gReplayIndex >= gReplayEvents.size()) {
+    gReplayActive.store(false);
+    gReplaySessionActive.store(false);
+    gTakeoverArmed.store(false);
+    gRecordArmed.store(false);
+    setReplayState(ReplayState::Idle, "replay_complete_immediate");
+  }
 }
 
 void stopReplay() {
   gReplayActive.store(false);
+  gReplaySessionActive.store(false);
   gReplayArmed.store(false);
-  gReplayRequested.store(false);
   gTakeoverArmed.store(false);
   gRecordArmed.store(false);
+  gIgnoreNextTakeoverInput = false;
+  gTakeoverInputIgnoreUntilMs = 0.0;
+  gReplayWasActiveBeforePause = false;
+  gBlockTakeoverUntilReplayDispatch = false;
+  setReplayState(ReplayState::Idle, "replay_stopped");
 }
 
 void startArmedActionsAtAttemptBoundary() {
@@ -847,25 +1143,25 @@ void startArmedActionsAtAttemptBoundary() {
     return;
   }
 
-  const auto now = std::chrono::steady_clock::now();
-  if (gLastAttemptBoundaryAt != std::chrono::steady_clock::time_point::min()) {
-    const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - gLastAttemptBoundaryAt).count();
-    if (elapsedMs >= 0 && elapsedMs < 120) {
-      return;
-    }
-  }
-  gLastAttemptBoundaryAt = now;
-
   gGameTimeMs = 0.0;
-  gRecordStartMs = 0.0;
-  gReplayStartMs = 0.0;
+  gGameRemainderMs = 0.0;
+  gGameTick = 0;
+  gRecordStartTick = 0;
+  gReplayStartTick = 0;
   gReplayIndex = 0;
+  gIgnoreNextTakeoverInput = false;
+  gTakeoverInputIgnoreUntilMs = 0.0;
+  gBlockTakeoverUntilReplayDispatch = false;
 
   gButtonDown[0][0] = gButtonDown[0][1] = gButtonDown[0][2] = false;
   gButtonDown[1][0] = gButtonDown[1][1] = gButtonDown[1][2] = false;
 
   if (gReplayArmed.load()) {
-    startReplay();
+    // Strict replay boundary latch: a replay armed during an active attempt
+    // must only start on the next attempt boundary.
+    if (gAttemptSerial >= gReplayStartBoundarySerial) {
+      startReplay();
+    }
   }
   if (gRecordArmed.load() && !gReplayActive.load()) {
     startRecording();
@@ -886,62 +1182,144 @@ class $modify(GJBaseGameLayer) {
     GJBaseGameLayer::update(dt);
     auto current = PlayLayer::get();
     const bool hadLevel = gActivePlayLayer != nullptr;
+    // On some builds, opening the pause/menu UI can temporarily make
+    // PlayLayer::get() null even though the attempt is still alive. Keep the
+    // in-level replay state intact and wait for PlayLayer to come back.
+    if (!current && hadLevel &&
+        (gReplayActive.load() || gReplaySessionActive.load() || gReplayArmed.load() || gTakeoverArmed.load() ||
+         gRecordArmed.load())) {
+      // Some pause/menu transitions temporarily null PlayLayer. Treat this as
+      // a paused state so resume-click cannot be misinterpreted as takeover.
+      if (!gWasPaused) {
+        gWasPaused = true;
+        gPauseStartedGameMs = gGameTimeMs;
+        gReplayWasActiveBeforePause = gReplayActive.load() || gReplaySessionActive.load();
+      }
+      gIgnoreNextTakeoverInput = true;
+      gTakeoverInputIgnoreUntilMs =
+        std::max(gTakeoverInputIgnoreUntilMs, gGameTimeMs + kTakeoverPauseGuardMs);
+      if (gReplaySessionActive.load() || gReplayActive.load()) {
+        gBlockTakeoverUntilReplayDispatch = true;
+      }
+      if (gReplaySessionActive.load() || gReplayActive.load()) {
+        setReplayState(ReplayState::Paused, "playlayer_null_paused");
+      }
+      if (gTakeoverArmed.load()) {
+        // Pause/menu overlays can transiently null PlayLayer and bypass the
+        // regular paused branch below. Disarm takeover here too so resume UI
+        // clicks cannot be interpreted as takeover triggers.
+        gTakeoverArmed.store(false);
+      }
+      return;
+    }
     const bool levelChanged = current != gActivePlayLayer;
     if (levelChanged) {
+      const bool previousLayerPaused = hadLevel && gActivePlayLayer && gActivePlayLayer->m_isPaused;
+      const bool preservePausedSession =
+        hadLevel && current &&
+        (current->m_isPaused || previousLayerPaused) &&
+        (gReplayActive.load() || gReplaySessionActive.load() || gReplayArmed.load() || gTakeoverArmed.load() ||
+         gRecordActive.load() || gRecordArmed.load());
+      if (preservePausedSession) {
+        // Some pause/menu transitions swap the PlayLayer pointer while the
+        // same attempt is still paused. Keep replay/record session state.
+        gActivePlayLayer = current;
+      } else {
       // If the level context changes while actively recording, finalize first
       // so /record/stop can still return a consistent snapshot.
-      if (gRecordActive.load()) {
-        stopRecording();
+        if (gRecordActive.load()) {
+          stopRecording();
+        }
+        gActivePlayLayer = current;
+        gGameTimeMs = 0.0;
+        gGameRemainderMs = 0.0;
+        gGameTick = 0;
+        gRecordStartTick = 0;
+        gReplayStartTick = 0;
+        gReplayIndex = 0;
+        gReplayActive.store(false);
+        gReplaySessionActive.store(false);
+        gTakeoverArmed.store(false);
+        gRecordFromTakeover = false;
+        gTakeoverStartTick = 0;
+        gIgnoreNextTakeoverInput = false;
+        gTakeoverInputIgnoreUntilMs = 0.0;
+        gBlockTakeoverUntilReplayDispatch = false;
+        gSkipNextDtAfterUnpause = false;
+        gReplayWasActiveBeforePause = false;
+        if (hadLevel) {
+          gRecordArmed.store(false);
+        }
+        gRecordStopRequested.store(false);
+        gReplayStopRequested.store(false);
+        gAttemptBoundaryPending = false;
+        gWasPaused = false;
+        gPauseStartedGameMs = 0.0;
+        setReplayState(ReplayState::Idle, "level_context_changed");
+        setRecordState(RecordState::Idle, "level_context_changed");
+        gButtonDown[0][0] = gButtonDown[0][1] = gButtonDown[0][2] = false;
+        gButtonDown[1][0] = gButtonDown[1][1] = gButtonDown[1][2] = false;
       }
-      gActivePlayLayer = current;
-      gGameTimeMs = 0.0;
-      gRecordStartMs = 0.0;
-      gReplayStartMs = 0.0;
-      gReplayIndex = 0;
-      gReplayActive.store(false);
-      gTakeoverArmed.store(false);
-      gRecordFromTakeover = false;
-      gTakeoverStartMs = 0.0;
-      if (hadLevel) {
-        gRecordArmed.store(false);
-      }
-      gRecordStopRequested.store(false);
-      gReplayRequested.store(false);
-      gReplayStopRequested.store(false);
-      gAttemptBoundaryPending = false;
-      gWasPaused = false;
-      gPauseStartedGameMs = 0.0;
-      gButtonDown[0][0] = gButtonDown[0][1] = gButtonDown[0][2] = false;
-      gButtonDown[1][0] = gButtonDown[1][1] = gButtonDown[1][2] = false;
     }
     gInLevel = current != nullptr;
     if (!gInLevel) return;
 
-    const bool levelStarted = levelChanged && current != nullptr;
+    const bool levelStarted = !hadLevel && current != nullptr;
     if (levelStarted) {
       gAttemptBoundaryPending = true;
+      gAttemptSerial += 1;
     }
 
     const bool paused = current->m_isPaused;
     if (paused) {
+      // Pause/menu UI clicks must never trigger takeover. Keep takeover
+      // disarmed for the entire paused duration, not just first paused frame.
+      if (gTakeoverArmed.load()) {
+        gTakeoverArmed.store(false);
+      }
+      gIgnoreNextTakeoverInput = true;
+      gTakeoverInputIgnoreUntilMs =
+        std::max(gTakeoverInputIgnoreUntilMs, gGameTimeMs + kTakeoverPauseGuardMs);
+      if (gReplaySessionActive.load() || gReplayActive.load()) {
+        gBlockTakeoverUntilReplayDispatch = true;
+      }
+
       if (!gWasPaused) {
         gWasPaused = true;
         gPauseStartedGameMs = gGameTimeMs;
+        gReplayWasActiveBeforePause = gReplayActive.load() || gReplaySessionActive.load();
+        if (gReplaySessionActive.load() || gReplayActive.load()) {
+          setReplayState(ReplayState::Paused, "game_paused");
+        }
       }
     } else if (gWasPaused) {
-      // Compensate any clock drift accumulated while paused so replay timing
-      // resumes tightly on unpause.
-      const double pausedDriftMs = std::max(0.0, gGameTimeMs - gPauseStartedGameMs);
-      if (pausedDriftMs > 0.0) {
-        if (gReplayActive.load()) {
-          gReplayStartMs += pausedDriftMs;
-        }
-        if (gRecordActive.load()) {
-          gRecordStartMs += pausedDriftMs;
-        }
+      // Tick-domain scheduler does not need start-time mutation on unpause.
+      // Some pause/menu transitions can transiently drop replay active state.
+      // If replay was active before pause and still has pending events, restore it.
+      if (gReplayWasActiveBeforePause && !gReplayActive.load() && gReplayIndex < gReplayEvents.size()) {
+        gReplayActive.store(true);
+        gReplaySessionActive.store(true);
+        gReplayStopRequested.store(false);
       }
+      gReplayWasActiveBeforePause = false;
       gWasPaused = false;
       gPauseStartedGameMs = 0.0;
+      // Guard the immediate post-unpause click path so the resume click cannot
+      // be reinterpreted as takeover if controller re-arms quickly.
+      gIgnoreNextTakeoverInput = true;
+      gTakeoverInputIgnoreUntilMs =
+        std::max(gTakeoverInputIgnoreUntilMs, gGameTimeMs + kTakeoverPauseGuardMs);
+      gSkipNextDtAfterUnpause = true;
+      if (gReplaySessionActive.load() || gReplayActive.load()) {
+        gBlockTakeoverUntilReplayDispatch = true;
+      }
+      if (gReplaySessionActive.load() || gReplayActive.load()) {
+        setReplayState(ReplayState::Live, "game_unpaused");
+      } else if (gReplayArmed.load()) {
+        setReplayState(ReplayState::Armed, "game_unpaused_keep_armed");
+      } else {
+        setReplayState(ReplayState::Idle, "game_unpaused_no_replay");
+      }
     }
 
     const bool levelCompleted = current->m_hasCompletedLevel;
@@ -950,18 +1328,50 @@ class $modify(GJBaseGameLayer) {
       startArmedActionsAtAttemptBoundary();
     }
     if (!paused) {
-      gGameTimeMs += static_cast<double>(dt) * 1000.0;
+      double dtMs = static_cast<double>(dt) * 1000.0;
+      if (gSkipNextDtAfterUnpause) {
+        dtMs = 0.0;
+        gSkipNextDtAfterUnpause = false;
+      }
+      gGameTimeMs += dtMs;
+      gGameRemainderMs += dtMs;
+      while (gGameRemainderMs + 1e-9 >= kTickMs) {
+        gGameRemainderMs -= kTickMs;
+        gGameTick += 1;
+      }
+    }
+
+    // While paused, do not advance replay/record state via death/complete checks.
+    // Only allow explicit stop requests.
+    if (paused) {
+      if (gReplaySessionActive.load() && !gReplayActive.load() && gReplayIndex < gReplayEvents.size() &&
+          !gReplayStopRequested.load()) {
+        gReplayActive.store(true);
+      }
+      if (gReplaySessionActive.load() || gReplayActive.load()) {
+        setReplayState(ReplayState::Paused, "paused_loop");
+      }
+      if (gRecordStopRequested.exchange(false) && gRecordActive.load()) {
+        stopRecording();
+      }
+      if (gReplayStopRequested.exchange(false)) {
+        stopReplay();
+      }
+      return;
+    }
+
+    // If replay was armed/started and got dropped by a transient menu/pause
+    // transition, recover replay on the same attempt.
+    if (gReplaySessionActive.load() && !gReplayActive.load() && gReplayIndex < gReplayEvents.size() &&
+        !gReplayStopRequested.load() && !didAnyPlayerDie() && !levelCompleted) {
+      gReplayActive.store(true);
+      setReplayState(ReplayState::Live, "replay_recovered_after_pause");
     }
 
     if (gRecordStopRequested.exchange(false) && gRecordActive.load()) {
       stopRecording();
     }
 
-    // Backward compatibility: older clients may still toggle replay via
-    // replay_requested. Convert that into a deterministic replay arm.
-    if (gReplayRequested.exchange(false)) {
-      gReplayArmed.store(true);
-    }
     if (gReplayStopRequested.exchange(false)) {
       stopReplay();
     }
@@ -971,7 +1381,6 @@ class $modify(GJBaseGameLayer) {
     // Important: if replay is only armed (not yet active), keep it armed so
     // it can start on the next attempt boundary.
     if (didAnyPlayerDie()) {
-      gReplayRequested.store(false);
       gReplayStopRequested.store(false);
       if (gReplayActive.load()) {
         stopReplay();
@@ -981,13 +1390,17 @@ class $modify(GJBaseGameLayer) {
         // Active recording should not stay armed after finalize.
         gRecordArmed.store(false);
       }
+      if (gRecordArmed.load()) {
+        setRecordState(RecordState::Armed, "record_kept_armed_after_death");
+      } else {
+        setRecordState(RecordState::Idle, "record_idle_after_death");
+      }
       // Keep record_armed across death when recording is not yet active, so
       // F9 arm can start on the next attempt boundary.
       gTakeoverArmed.store(false);
     }
 
     if (levelCompleted) {
-      gReplayRequested.store(false);
       gReplayStopRequested.store(false);
       stopReplay();
       if (gRecordActive.load()) {
@@ -995,24 +1408,26 @@ class $modify(GJBaseGameLayer) {
       }
       gRecordArmed.store(false);
       gTakeoverArmed.store(false);
-    }
-
-    if (paused) {
-      return;
+      setRecordState(RecordState::Idle, "level_completed");
+      setReplayState(ReplayState::Idle, "level_completed");
     }
 
     if (gReplayActive.load()) {
-      const double elapsed = gGameTimeMs - gReplayStartMs;
+      const std::int64_t elapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
       while (gReplayIndex < gReplayEvents.size()) {
         const auto& event = gReplayEvents[gReplayIndex];
-        if (event.t_ms > elapsed + kMsEpsilon) break;
+        if (event.t_tick > elapsedTicks) break;
         dispatchReplayEvent(event);
+        appendReplayDispatchSample(gReplayIndex, event, elapsedTicks);
+        gBlockTakeoverUntilReplayDispatch = false;
         gReplayIndex += 1;
       }
       if (gReplayIndex >= gReplayEvents.size()) {
         gReplayActive.store(false);
+        gReplaySessionActive.store(false);
         gTakeoverArmed.store(false);
         gRecordArmed.store(false);
+        setReplayState(ReplayState::Idle, "replay_complete");
       }
     }
   }
@@ -1022,15 +1437,19 @@ class $modify(PlayLayer) {
   void resetLevel() {
     PlayLayer::resetLevel();
     gAttemptBoundaryPending = true;
+    gAttemptSerial += 1;
     gWasPaused = false;
     gPauseStartedGameMs = 0.0;
+    gSkipNextDtAfterUnpause = false;
   }
 
   void resetLevelFromStart() {
     PlayLayer::resetLevelFromStart();
     gAttemptBoundaryPending = true;
+    gAttemptSerial += 1;
     gWasPaused = false;
     gPauseStartedGameMs = 0.0;
+    gSkipNextDtAfterUnpause = false;
   }
 
   void onQuit() {
@@ -1045,6 +1464,9 @@ class $modify(PlayLayer) {
     gAttemptBoundaryPending = false;
     gWasPaused = false;
     gPauseStartedGameMs = 0.0;
+    gBlockTakeoverUntilReplayDispatch = false;
+    setReplayState(ReplayState::Idle, "playlayer_quit");
+    setRecordState(RecordState::Idle, "playlayer_quit");
   }
 };
 

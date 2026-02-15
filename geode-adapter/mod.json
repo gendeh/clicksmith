@@ -2,7 +2,7 @@
   "geode": "4.10.2",
   "id": "clicksmith.geode-adapter",
   "name": "Clicksmith Geode Adapter",
-  "version": "0.2.1",
+  "version": "0.2.5",
   "developer": "Clicksmith",
   "description": "Exposes local record/replay endpoints for Clicksmith.",
   "gd": {

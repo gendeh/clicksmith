@@ -1,6 +1,9 @@
 import base64
+import hashlib
+import json
 import os
 import time
+from collections import OrderedDict
 
 import cv2
 import numpy as np
@@ -8,14 +11,49 @@ import pytesseract
 from flask import Flask, jsonify, request
 
 app = Flask(__name__)
+MATCH_CACHE = OrderedDict()
+MATCH_CACHE_LIMIT = int(os.environ.get("MATCH_CACHE_LIMIT", "256"))
+
+
+def base64_to_bytes(b64_string):
+    if ',' in b64_string:
+        b64_string = b64_string.split(',')[1]
+    return base64.b64decode(b64_string)
+
+
+def bytes_to_cv2(img_data):
+    np_arr = np.frombuffer(img_data, np.uint8)
+    return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
 
 def base64_to_cv2(b64_string):
-    if ',' in b64_string:
-        b64_string = b64_string.split(',')[1]
-    img_data = base64.b64decode(b64_string)
-    np_arr = np.frombuffer(img_data, np.uint8)
-    return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+    return bytes_to_cv2(base64_to_bytes(b64_string))
+
+
+def make_cache_key(template_bytes, search_bytes, threshold, method, find_all, max_matches):
+    digest = hashlib.sha1()
+    digest.update(template_bytes)
+    digest.update(b"|")
+    digest.update(search_bytes)
+    digest.update(b"|")
+    digest.update(f"{threshold}|{method}|{int(find_all)}|{max_matches}".encode("utf-8"))
+    return digest.hexdigest()
+
+
+def cache_get(key):
+    value = MATCH_CACHE.get(key)
+    if value is None:
+        return None
+    # LRU touch
+    MATCH_CACHE.move_to_end(key)
+    return value
+
+
+def cache_set(key, value):
+    MATCH_CACHE[key] = value
+    MATCH_CACHE.move_to_end(key)
+    while len(MATCH_CACHE) > MATCH_CACHE_LIMIT:
+        MATCH_CACHE.popitem(last=False)
 
 
 def match_template(template, search_area, threshold, find_all, max_matches):
@@ -84,19 +122,42 @@ def health():
 def match_image():
     start_time = time.time()
     try:
-        data = request.json or {}
-        template_b64 = data.get("template")
-        search_area_b64 = data.get("searchArea")
-        threshold = float(data.get("threshold", 0.6))
-        method = data.get("method", "template")
-        find_all = bool(data.get("findAll", False))
-        max_matches = int(data.get("maxMatches", 1))
+        if request.files and "template_file" in request.files:
+            template_file = request.files.get("template_file")
+            search_area_file = request.files.get("search_area_file")
+            if not template_file or not search_area_file:
+                return jsonify({"error": "Missing template or search area image"}), 400
+            template_bytes = template_file.read()
+            search_area_bytes = search_area_file.read()
+            threshold = float(request.form.get("threshold", 0.6))
+            method = request.form.get("method", "template")
+            find_all = str(request.form.get("findAll", "false")).lower() == "true"
+            max_matches = int(request.form.get("maxMatches", 1))
+        else:
+            data = request.json or {}
+            template_b64 = data.get("template")
+            search_area_b64 = data.get("searchArea")
+            threshold = float(data.get("threshold", 0.6))
+            method = data.get("method", "template")
+            find_all = bool(data.get("findAll", False))
+            max_matches = int(data.get("maxMatches", 1))
 
-        if not template_b64 or not search_area_b64:
-            return jsonify({"error": "Missing template or search area image"}), 400
+            if not template_b64 or not search_area_b64:
+                return jsonify({"error": "Missing template or search area image"}), 400
 
-        template = base64_to_cv2(template_b64)
-        search_area = base64_to_cv2(search_area_b64)
+            template_bytes = base64_to_bytes(template_b64)
+            search_area_bytes = base64_to_bytes(search_area_b64)
+
+        cache_key = make_cache_key(template_bytes, search_area_bytes, threshold, method, find_all, max_matches)
+        cached = cache_get(cache_key)
+        if cached is not None:
+            payload = json.loads(json.dumps(cached))
+            payload["processingTimeMs"] = int((time.time() - start_time) * 1000)
+            payload["cacheHit"] = True
+            return jsonify(payload)
+
+        template = bytes_to_cv2(template_bytes)
+        search_area = bytes_to_cv2(search_area_bytes)
 
         best_match = None
         matches = []
@@ -112,14 +173,15 @@ def match_image():
 
         processing_ms = int((time.time() - start_time) * 1000)
 
-        return jsonify(
-            {
-                "success": best_match is not None and best_match["confidence"] >= threshold,
-                "matches": matches,
-                "bestMatch": best_match,
-                "processingTimeMs": processing_ms,
-            }
-        )
+        payload = {
+            "success": best_match is not None and best_match["confidence"] >= threshold,
+            "matches": matches,
+            "bestMatch": best_match,
+            "processingTimeMs": processing_ms,
+            "cacheHit": False,
+        }
+        cache_set(cache_key, payload)
+        return jsonify(payload)
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 

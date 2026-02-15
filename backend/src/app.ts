@@ -7,6 +7,15 @@ import * as authController from './controllers/authController';
 import * as profileController from './controllers/profileController';
 import * as billingController from './controllers/billingController';
 import * as imageController from './controllers/imageController';
+import { authenticateRequest } from './middleware/auth';
+import { validateBody } from './middleware/validate';
+import {
+  validateCheckoutBody,
+  validateLoginBody,
+  validateProfileCreateBody,
+  validateProfileUpdateBody,
+  validateSignupBody,
+} from './validation/schemas';
 
 dotenv.config();
 
@@ -21,19 +30,19 @@ app.post('/api/v1/billing/webhook', express.raw({ type: 'application/json' }), b
 app.use(express.json());
 
 // Auth Routes
-app.post('/api/v1/auth/signup', authController.signup);
-app.post('/api/v1/auth/login', authController.login);
-app.get('/api/v1/auth/profile', authController.getProfile);
+app.post('/api/v1/auth/signup', validateBody(validateSignupBody), authController.signup);
+app.post('/api/v1/auth/login', validateBody(validateLoginBody), authController.login);
+app.get('/api/v1/auth/profile', authenticateRequest, authController.getProfile);
 
 // Profile Routes
-app.get('/api/v1/profiles', profileController.listProfiles);
-app.get('/api/v1/profiles/:id', profileController.getProfile);
-app.post('/api/v1/profiles', profileController.createProfile);
-app.put('/api/v1/profiles/:id', profileController.updateProfile);
-app.delete('/api/v1/profiles/:id', profileController.deleteProfile);
+app.get('/api/v1/profiles', authenticateRequest, profileController.listProfiles);
+app.get('/api/v1/profiles/:id', authenticateRequest, profileController.getProfile);
+app.post('/api/v1/profiles', authenticateRequest, validateBody(validateProfileCreateBody), profileController.createProfile);
+app.put('/api/v1/profiles/:id', authenticateRequest, validateBody(validateProfileUpdateBody), profileController.updateProfile);
+app.delete('/api/v1/profiles/:id', authenticateRequest, profileController.deleteProfile);
 
 // Billing Routes
-app.post('/api/v1/billing/checkout', billingController.createCheckoutSession);
+app.post('/api/v1/billing/checkout', authenticateRequest, validateBody(validateCheckoutBody), billingController.createCheckoutSession);
 
 // Image Matching Proxy
 app.post('/api/v1/image/match', imageController.matchImage);

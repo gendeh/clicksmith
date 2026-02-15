@@ -1,4 +1,4 @@
-# Clicksmith Mod Protocol (Draft v0.1)
+# Clicksmith Mod Protocol (v1.0.0)
 
 Clicksmith treats game mods as separate processes that expose a simple local API. The protocol
 is intentionally minimal so each game/framework can implement it without sharing internals.
@@ -12,20 +12,39 @@ is intentionally minimal so each game/framework can implement it without sharing
 
 ### `GET /status`
 
-Returns a lightweight status payload.
+Returns a lightweight status payload. Clicksmith treats this as a hard compatibility
+gate before any record/replay/takeover call is allowed.
 
 Response:
 ```
 {
   "ok": true,
   "id": "geode-geometry-dash",
-  "name": "Geode Adapter",
+  "name": "Clicksmith Geode Adapter",
   "game": "Geometry Dash",
-  "version": "0.1.0",
-  "capabilities": ["record", "replay"],
-  "tick_hz": 240
+  "version": "0.2.5",
+  "protocol_version": "1.0.0",
+  "capabilities": ["status", "record", "replay"],
+  "tick_hz": 240,
+  "record_state": "idle",
+  "record_active": false,
+  "record_armed": false,
+  "record_complete": false,
+  "replay_state": "idle",
+  "replay_active": false,
+  "replay_armed": false,
+  "replay_requested": false,
+  "paused": false,
+  "takeover_armed": false
 }
 ```
+
+Required compatibility checks:
+- `ok === true`
+- `protocol_version` major must be `1`
+- `capabilities` must include `status`, `record`, `replay`
+- `tick_hz` must be finite and > 0
+- record/replay lifecycle fields above must exist with valid enum/boolean types
 
 ## Core Endpoints (v0.2)
 
@@ -77,9 +96,10 @@ Response:
 
 ## Optional Endpoints
 
-### `POST /takeover`
+### `POST /replay/takeover`
 
-Signals the mod to hand control back to the user.
+Signals the mod to hand control back to the user and switch to takeover recording.
+Takeover is valid only while replay is `live`.
 
 ## Notes
 

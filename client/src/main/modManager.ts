@@ -3,6 +3,7 @@ import os from 'os';
 import path from 'path';
 import { app, shell } from 'electron';
 import { ModAdapterManifest, ModAdapterStatus, ModRegistry } from '../types';
+import { validateModStatusPayload } from './modProtocol';
 
 const DEFAULT_REGISTRY: ModRegistry = {
   version: 1,
@@ -122,6 +123,11 @@ async function probeConnection(adapter: ModAdapterManifest): Promise<{ connectio
     clearTimeout(timeout);
     if (!response.ok) {
       return { connection: 'unreachable', lastError: `Status error (${response.status})` };
+    }
+    const payload = await response.json();
+    const validation = validateModStatusPayload(payload);
+    if (!validation.ok) {
+      return { connection: 'unreachable', lastError: `Protocol contract invalid: ${validation.error}` };
     }
     return { connection: 'connected' };
   } catch (error: any) {

@@ -48,6 +48,8 @@ export interface RecordedEvent {
   duration_ms: number;
   /** Base64 encoded image patch (128x128) around cursor */
   img_patch_b64?: string;
+  /** Content-addressed image patch reference (sha256) */
+  img_patch_ref?: string;
   /** SHA256 hash of image patch for quick comparison */
   img_hash?: string;
   /** Whether this event was a human override/takeover */

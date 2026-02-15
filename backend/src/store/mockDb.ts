@@ -19,10 +19,17 @@ export const mockDb = {
     users.set(user.uid, user);
     return user;
   },
+  findUserByEmail: (email: string) =>
+    Array.from(users.values()).find(user => user.email.toLowerCase() === email.toLowerCase()),
   getUser: (uid: string) => users.get(uid),
   setSubscription: (subscription: SubscriptionRecord) => {
     subscriptions.set(subscription.uid, subscription);
     return subscription;
   },
   getSubscription: (uid: string) => subscriptions.get(uid),
+  clear: () => {
+    profiles.clear();
+    users.clear();
+    subscriptions.clear();
+  },
 };
