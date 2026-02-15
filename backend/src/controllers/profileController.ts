@@ -28,7 +28,7 @@ export const getProfile = async (req: Request, res: Response) => {
       res.status(404).json({ error: 'Profile not found' });
       return;
     }
-    const data = { id: doc.id, ...(doc.data() as Profile) };
+    const data = { ...(doc.data() as Profile), id: doc.id };
     if (data.ownerId && data.ownerId !== ownerId) {
       res.status(403).json({ error: 'Forbidden' });
       return;

@@ -78,12 +78,116 @@ describe('PlaybackEngine', () => {
     });
 
     await engine.start(config, baseProfile);
-    jest.advanceTimersByTime(200);
+    await jest.advanceTimersByTimeAsync(250);
 
     expect(actions).toContain('mouseDown');
     expect(actions).toContain('mouseUp');
     expect(actions).toContain('keyDown');
     expect(engine.getStatus().state).toBe('idle');
+    jest.useRealTimers();
+  });
+
+  test('pause/resume compensates timeline without cumulative drift', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+
+    const profile: Profile = {
+      ...baseProfile,
+      events: [
+        {
+          t_ms: 100,
+          type: 'mouse',
+          btn: 'left',
+          x: 10,
+          y: 20,
+          rel_x: 0.1,
+          rel_y: 0.2,
+          duration_ms: 0,
+          human_override: false,
+        },
+      ],
+    };
+
+    const actions: string[] = [];
+    const fakePlayer = {
+      moveMouse: () => actions.push('move'),
+      mouseDown: () => actions.push('mouseDown'),
+      mouseUp: () => actions.push('mouseUp'),
+      keyDown: () => actions.push('keyDown'),
+      keyUp: () => actions.push('keyUp'),
+    };
+
+    const engine = new PlaybackEngine({
+      inputPlayer: fakePlayer as any,
+      windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }) } as any,
+    });
+
+    await engine.start(config, profile);
+    await jest.advanceTimersByTimeAsync(40);
+    engine.pause();
+    await jest.advanceTimersByTimeAsync(500);
+    expect(actions.length).toBe(0);
+
+    engine.resume();
+    await jest.advanceTimersByTimeAsync(55);
+    expect(actions.length).toBe(0);
+    await jest.advanceTimersByTimeAsync(10);
+    expect(actions).toContain('mouseDown');
+    expect(actions).toContain('mouseUp');
+    jest.useRealTimers();
+  });
+
+  test('dispatch order is stable for same timestamp actions', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+
+    const profile: Profile = {
+      ...baseProfile,
+      events: [
+        {
+          t_ms: 0,
+          type: 'mouse',
+          btn: 'left',
+          x: 10,
+          y: 20,
+          rel_x: 0.1,
+          rel_y: 0.2,
+          duration_ms: 0,
+          human_override: false,
+        },
+        {
+          t_ms: 0,
+          type: 'keyboard',
+          key: 'a',
+          keyCode: 30,
+          x: 10,
+          y: 20,
+          rel_x: 0.1,
+          rel_y: 0.2,
+          duration_ms: 0,
+          human_override: false,
+        },
+      ],
+    };
+
+    const actions: string[] = [];
+    const fakePlayer = {
+      moveMouse: () => actions.push('move'),
+      mouseDown: () => actions.push('mouseDown'),
+      mouseUp: () => actions.push('mouseUp'),
+      keyDown: () => actions.push('keyDown'),
+      keyUp: () => actions.push('keyUp'),
+    };
+
+    const engine = new PlaybackEngine({
+      inputPlayer: fakePlayer as any,
+      windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }) } as any,
+    });
+
+    await engine.start(config, profile);
+    await jest.advanceTimersByTimeAsync(20);
+
+    expect(actions).toEqual(['move', 'mouseDown', 'keyDown', 'mouseUp', 'keyUp']);
     jest.useRealTimers();
   });
 });

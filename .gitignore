@@ -20,3 +20,8 @@ coverage/
 .vscode/
 .idea/
 gd backup/
+
+image-service/.venv/
+image-service/.pytest_cache/
+**/__pycache__/
+*.pyc

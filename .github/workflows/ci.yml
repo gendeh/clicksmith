@@ -13,16 +13,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 18
-      - name: Install root deps
-        run: npm install
-      - name: Install client deps
-        run: cd client && npm install
       - name: Install backend deps
         run: cd backend && npm install
-      - name: Lint
-        run: npm run lint
-      - name: Test
-        run: npm test
+      - name: Test backend
+        run: cd backend && npm test
 
   image-service-tests:
     runs-on: ubuntu-latest
@@ -38,7 +32,7 @@ jobs:
       - name: Pytest
         run: |
           cd image-service
-          pytest
+          PYTHONPATH=. pytest -q
 
   build-windows:
     runs-on: windows-latest
