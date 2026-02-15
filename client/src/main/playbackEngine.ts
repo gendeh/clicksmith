@@ -250,14 +250,22 @@ export class PlaybackEngine extends EventEmitter {
                 this.startedAt += smartClickWait;
             }
 
+            let shouldAdvanceIndex = false;
             try {
+                // Playback state may change while awaiting SmartClick matching.
+                if (!this.isPlaying) {
+                    break;
+                }
                 await this.executeAction(action, coords, index, scheduledAt, actualAt);
+                shouldAdvanceIndex = true;
             } catch (error) {
                 this.status = { ...this.status, lastError: 'playback_event_failed' };
                 this.emit('error', error);
             } finally {
                 this.smartClickResults.delete(index);
-                this.currentActionIndex = index + 1;
+                if (shouldAdvanceIndex) {
+                    this.currentActionIndex = index + 1;
+                }
             }
         }
 
