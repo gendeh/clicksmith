@@ -61,11 +61,23 @@ export function mergeTakeoverEvents(
         .map(event => clipBaseEventAtTakeoverBoundary(event, takeoverStartMs))
         .filter((event): event is RecordedEvent => event !== null);
 
-    const shiftedTakeover = takeoverEvents.map(event => ({
-        ...event,
-        t_ms: takeoverStartMs + event.t_ms,
-        human_override: true,
-    }));
+    const shiftedTakeover = takeoverEvents.map(event => {
+        const metadata = event.metadata as Record<string, unknown> | undefined;
+        const releaseTime =
+            typeof metadata?.release_t_ms === 'number' ? (metadata.release_t_ms as number) : undefined;
+        return {
+            ...event,
+            t_ms: takeoverStartMs + event.t_ms,
+            human_override: true,
+            metadata:
+                releaseTime !== undefined
+                    ? {
+                          ...(metadata ?? {}),
+                          release_t_ms: takeoverStartMs + releaseTime,
+                      }
+                    : event.metadata,
+        };
+    });
 
     return [...baseEvents, ...shiftedTakeover].sort((a, b) => a.t_ms - b.t_ms);
 }
