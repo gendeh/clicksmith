@@ -1,4 +1,4 @@
-type ClicksmithListener = (event: unknown, ...args: unknown[]) => void;
+type ClicksmithListener = (event: unknown, ...args: any[]) => void;
 
 declare global {
     interface Window {

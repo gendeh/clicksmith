@@ -78,7 +78,6 @@ export function installVerifyBridge() {
   const profiles = new Map<string, Profile>();
   let preferences = defaultPreferences();
   let eulaAccepted = params.get('eula') !== 'required';
-  let recordingState: 'idle' | 'armed' | 'recording' | 'paused' = 'idle';
   let playbackStatus: PlaybackStatus = {
     state: 'idle',
     currentEventIndex: 0,
@@ -199,11 +198,9 @@ export function installVerifyBridge() {
             },
           ];
         case IPC_CHANNELS.RECORDING_START:
-          recordingState = 'recording';
           emit(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
           return { success: true };
         case IPC_CHANNELS.RECORDING_STOP: {
-          recordingState = 'idle';
           draft = {
             target_app: 'screen',
             events: [{ ...SAMPLE_EVENT }],

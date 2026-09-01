@@ -4,7 +4,7 @@ import '../styles/global.css';
 import { installVerifyBridge, shouldInstallVerifyBridge } from './verifyBridge';
 import App from './App';
 
-if (shouldInstallVerifyBridge()) {
+if (import.meta.env.VITE_CLICKSMITH_VERIFY === 'true' && shouldInstallVerifyBridge()) {
   installVerifyBridge();
 }
 

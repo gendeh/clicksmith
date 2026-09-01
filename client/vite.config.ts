@@ -32,6 +32,9 @@ export default defineConfig({
             },
         ]),
     ],
+    define: {
+        'import.meta.env.VITE_CLICKSMITH_VERIFY': JSON.stringify('false'),
+    },
     resolve: {
         alias: {
             '@': path.resolve(__dirname, './src'),
