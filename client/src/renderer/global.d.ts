@@ -1,6 +1,4 @@
-import { IpcRendererEvent } from 'electron';
-
-type ClicksmithListener = (event: IpcRendererEvent, ...args: any[]) => void;
+type ClicksmithListener = (event: unknown, ...args: unknown[]) => void;
 
 declare global {
     interface Window {

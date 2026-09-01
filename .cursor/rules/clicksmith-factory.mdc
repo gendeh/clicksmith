@@ -1,0 +1,23 @@
+---
+description: Clicksmith agent factory — verification, boundaries, and skip rules
+alwaysApply: true
+---
+
+Clicksmith is an Electron recorder with a Python image-service and an Express API. Cloud Agents run Linux and cannot drive OS hooks or Geometry Dash.
+
+Before claiming a change works, read `.cursor/skills/verify-clicksmith/SKILL.md` and the matching file under `.cursor/skills/verify-clicksmith/features/`. Drive the real lane. Capture evidence under `.cursor/skills/verify-clicksmith/artifacts/`. A passing compile is not proof.
+
+Lanes:
+
+- `ui`: verify renderer at Vite, `data-testid` handles, Playwright or computer-use
+- `api`: backend `/health` + `/api/v1/profiles`, image-service `/match`
+- `desktop`: real Electron + `uiohook-napi` / `robotjs` — skip on Cloud Agents
+- `game`: Geode adapter `:27737` — skip on Cloud Agents
+
+If a path is unreachable, write `SKIP desktop` or `SKIP game` with the attempted command. Do not substitute another lane.
+
+Renderer (`client/src/renderer`) must not import Electron main. Main (`client/src/main`) must not import renderer. `nodeIntegration: true` is forbidden. Run `bash scripts/check-boundaries.sh` after process-boundary edits.
+
+Do not ask the user to run the app, paste screenshots, or confirm routine next steps. Launch, doctor, drive, and show evidence. Reserve questions for irreversible or secret-gated actions.
+
+pstack `/poteto-mode` is the preferred router when the plugin is loaded. If it is missing (common on Cloud Agents), follow `docs/pstack/README.md` and `.cursor/skills/clicksmith-factory/SKILL.md` instead of improvising.
