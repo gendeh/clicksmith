@@ -68,6 +68,15 @@ jobs:
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs drive manager-controls
           test -f .cursor/skills/verify-clicksmith/artifacts/manager-controls/proof.json
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs cleanup
+      - name: Upload verify evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-clicksmith-manager-controls
+          path: |
+            .cursor/skills/verify-clicksmith/artifacts/manager-controls/
+            /tmp/clicksmith-verify/ci/*.log
+          if-no-files-found: warn
 
   build-windows:
     runs-on: windows-2022
