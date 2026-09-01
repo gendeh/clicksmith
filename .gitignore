@@ -25,3 +25,9 @@ image-service/.venv/
 image-service/.pytest_cache/
 **/__pycache__/
 *.pyc
+
+# Verify artifacts (proof must survive local cleanup of run dirs)
+.cursor/skills/verify-clicksmith/artifacts/**
+!.cursor/skills/verify-clicksmith/artifacts/.gitkeep
+.cursor/skills/verify-clicksmith/node_modules/
+

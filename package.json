@@ -22,6 +22,8 @@
     "lint": "npm run lint:client && npm run lint:backend",
     "lint:client": "cd client && npm run lint",
     "lint:backend": "cd backend && npm run lint",
+    "check:boundaries": "bash scripts/check-boundaries.sh",
+    "verify:install": "npm --prefix .cursor/skills/verify-clicksmith install",
     "package": "cd client && npm run package",
     "installer": "cd installer && makensis clicksmith.nsi"
   },

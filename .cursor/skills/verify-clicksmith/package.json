@@ -1,0 +1,14 @@
+{
+  "name": "verify-clicksmith",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "control-clicksmith": "./scripts/control-clicksmith.mjs"
+  },
+  "scripts": {
+    "control": "node scripts/control-clicksmith.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.55.0"
+  }
+}

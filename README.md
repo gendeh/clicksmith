@@ -79,6 +79,10 @@ graph TD
     IMG -->|OpenCV| CV[Image Matching]
 ```
 
+## Agent factory
+
+Cloud Agents, feature map, verification lanes, and the 1000-PR operating manual live in `docs/pstack/README.md`. The driver is `.cursor/skills/verify-clicksmith/`.
+
 ## EULA
 
 The installer and first-run modal require acceptance of a Clicksmith EULA, including the restriction on online competitive use.

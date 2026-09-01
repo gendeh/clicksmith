@@ -8,7 +8,10 @@ module.exports = {
     '^@services/(.*)$': '<rootDir>/src/services/$1',
     '^@hooks/(.*)$': '<rootDir>/src/hooks/$1',
     '^@utils/(.*)$': '<rootDir>/src/utils/$1',
-    '^@types/(.*)$': '<rootDir>/src/types/$1'
+    '^@types/(.*)$': '<rootDir>/src/types/$1',
+    '^screenshot-desktop$': '<rootDir>/tests/mocks/screenshotDesktop.js',
+    '^robotjs$': '<rootDir>/tests/mocks/robotjs.js',
+    '^electron$': '<rootDir>/tests/mocks/electron.js'
   },
   transform: {
     '^.+\\.tsx?$': ['ts-jest', {
