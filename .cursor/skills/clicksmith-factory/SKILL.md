@@ -18,6 +18,8 @@ Match the request:
 | New user-visible behavior | Feature: name the data shape, implement, drive every mapped entry point. |
 | Same behavior, new structure | Refactor: prove before and after with the same driver. |
 | Overnight / many PRs | Autopilot: one owner per PR, verify-clicksmith on each head, no human inner loop. |
+| Get a PR green / check on PR N | Babysit (`playbooks/babysit.md`). Stops at merge-ready. Does not merge. |
+| Land / ship / merge a green PR | Shipping (`playbooks/shipping.md`). Independent verify, then land. |
 
 Keep every step visible. If you skip a step, record why next to it.
 

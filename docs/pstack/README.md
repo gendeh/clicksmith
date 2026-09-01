@@ -8,7 +8,9 @@ This is the operating manual for scaling Clicksmith with Cloud Agents. It is not
 
 **Is that enough to reach 1000 PRs a month?** No. A feature map without a machine that boots the app still makes you the inner loop: you screenshot, paste, wait. 1000 PRs/month is ~33 merged PRs/day. That only works if the human is out of record → fix → prove → merge. The other first step, in parallel, is a Cloud Agent environment: dependencies installed, services up, verify renderer reachable, secrets not in git.
 
-**What the Environment panel is.** Cursor Cloud Agents boot an isolated Ubuntu VM. The screenshot you saw (`gendeh/clicksmith`, empty Install/Start) is the dashboard-managed environment for this repo. Install runs once per environment build and snapshots the disk. Start runs on every agent boot and must bring up backend, image-service, and the verify renderer. Secrets stay in that panel, never in `environment.json`. After this change is saved, new agents skip "it doesn't build on my machine."
+**What the Environment panel is.** Cursor Cloud Agents boot an isolated Ubuntu VM. The screenshot you saw (`gendeh/clicksmith`, empty Install/Start) is the dashboard-managed environment for this repo. Install runs once per environment build and snapshots the disk. Start runs on every agent boot and must bring up backend, image-service, and the verify renderer. Secrets stay in that panel, never in `environment.json`.
+
+Yellow **Needs build** on that panel is expected until two things are true: (1) `scripts/cloud-install.sh` and `scripts/cloud-start.sh` exist on `main`, and (2) you click **Save** so Cursor can run a promotable build from the default branch. Do not Save while those scripts live only on a PR branch. The install command is `bash scripts/cloud-install.sh`; a default-branch build cannot find that file until this PR merges. A draft build from the PR branch can succeed and still leave the panel yellow, because non-default-ref builds are not promotable.
 
 The rest of this document is the factory that sits on top of those two primitives.
 
@@ -123,6 +125,23 @@ A Cloud Agent that "forgets" to verify still turns the build red if the manager 
 
 Install pstack in Cursor: `/add-plugin pstack`, then `/setup-pstack`. Start real work with `/poteto-mode`.
 
+`/poteto-mode` is a router. You do not type a nested skill name like `/poteto-mode "/poteto mode"`. You type `/poteto-mode` plus the goal in plain language. The words after the slash are what get matched. Naming a playbook is optional; enumerating leaf skills is usually worse.
+
+| Goal | Playbook `/poteto-mode` should copy |
+| --- | --- |
+| Get PR N green / check on it | **Babysit.** Stops at merge-ready. Never merges. |
+| Land it / ship it / merge it | **Shipping.** Independent verify, then land. Graphite MWR in the official playbook; this repo is a single GitHub PR, so the land step is `gh pr merge` only after that verify. |
+| Overnight queue of independent PRs | **Autopilot-full.** Not for one existing PR. |
+
+Example, after pstack is installed locally:
+
+```text
+/poteto-mode get https://github.com/gendeh/clicksmith/pull/3 green, then land it on main.
+Do not merge until independent verify-clicksmith proof and GitHub checks are green.
+```
+
+That routes Babysit first (CI, draft→ready), then Shipping (fresh verify, then merge). `/poteto-mode babysit this pr. get it green.` stops before merge on purpose.
+
 Cloud Agents often cannot see that plugin. They still have:
 
 - `.cursor/skills/clicksmith-factory/SKILL.md`
@@ -174,7 +193,7 @@ Work that will:
 
 ## Step-by-step: first week
 
-1. Save the Cloud Agent environment (Install/Start from `scripts/cloud-install.sh` and `scripts/cloud-start.sh`). Confirm a new agent can `curl` `:3000/health`, `:5001/health`, and load `:5173` with `[data-testid="app-shell"]`.
+1. Merge this factory PR first so the scripts exist on `main`. Then Save the Cloud Agent environment (Install/Start from `scripts/cloud-install.sh` and `scripts/cloud-start.sh`) and wait for a green default-ref build. Confirm a new agent can `curl` `:3000/health`, `:5001/health`, and load `:5173` with `[data-testid="app-shell"]`. If the panel still says Needs build before merge, click Cancel, not Save.
 2. Install pstack locally. Keep the committed skills; they are the cloud fallback.
 3. Run one complete loop yourself: `/poteto-mode` (or `clicksmith-factory`) on a tiny `ui` bug. Demand `artifacts/manager-controls/proof.json`. Merge only with that.
 4. Run the blinded eval `docs/pstack/evals/cases/manager-record-save.md`. If the worker reports success without artifacts, the factory is not ready. Fix the skill, not the prompt.

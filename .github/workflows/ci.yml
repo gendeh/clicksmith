@@ -21,11 +21,11 @@ jobs:
         with:
           node-version: 18
       - name: Install backend deps
-        run: npm --prefix backend ci
+        run: npm --prefix backend install
       - name: Test backend
         run: npm --prefix backend test
       - name: Install client deps without native addons
-        run: npm --prefix client ci --ignore-scripts
+        run: npm --prefix client install --ignore-scripts
       - name: Test client engines
         run: npm --prefix client test
 
@@ -51,7 +51,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 18
+          node-version: 20
       - uses: actions/setup-python@v5
         with:
           python-version: '3.9'
@@ -70,7 +70,7 @@ jobs:
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs cleanup
 
   build-windows:
-    runs-on: windows-latest
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
