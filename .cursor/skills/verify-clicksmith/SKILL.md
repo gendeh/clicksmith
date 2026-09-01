@@ -37,6 +37,8 @@ node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs launch --la
 
 Default cloud boot already starts backend `http://127.0.0.1:3000`, image-service `http://127.0.0.1:5001`, and the verify renderer `http://127.0.0.1:5173`. Reuse those URLs when `CLICKSMITH_VERIFY_DIR` is unset and doctor against the default ports. Do not launch a second copy on the same ports.
 
+`launch` refuses to start when `state.json` already exists in the run dir or when any assigned port is held by a process it did not start. A 200 from a stale server is not your instance. Treat that refusal as the signal: `cleanup` your own run, or pick another `CLICKSMITH_VERIFY_PORT_BASE`. PIDs are written to `state.json` before health waits, so a failed launch is still cleanable.
+
 Ready checks:
 
 - Backend: `GET /health` returns `{"status":"ok"}`

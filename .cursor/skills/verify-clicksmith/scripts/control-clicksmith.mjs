@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process';
 import { openSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
+import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -68,6 +69,29 @@ async function waitFor(url, timeoutMs = 30000) {
   throw new Error(`Timed out waiting for ${url}: ${last}`);
 }
 
+function assertPortFree(port) {
+  return new Promise((resolvePort, reject) => {
+    const probe = createServer();
+    probe.once('error', error => {
+      reject(new Error(`Port ${port} is already in use (${error.code}). This run did not start that process. Stop it or pick another CLICKSMITH_VERIFY_PORT_BASE.`));
+    });
+    probe.listen({ port, host: '127.0.0.1' }, () => probe.close(() => resolvePort()));
+  });
+}
+
+function tailOf(file, lines = 20) {
+  if (!existsSync(file)) return '';
+  return readFileSync(file, 'utf8').trim().split('\n').slice(-lines).join('\n');
+}
+
+function assertAlive(proc) {
+  try {
+    process.kill(proc.pid, 0);
+  } catch {
+    throw new Error(`Process ${proc.pid} exited before becoming healthy. ${proc.logFile}:\n${tailOf(proc.logFile)}`);
+  }
+}
+
 function spawnLogged(command, args, options) {
   mkdirSync(runDir(), { recursive: true });
   const logFile = join(runDir(), `${options.logName}.log`);
@@ -83,7 +107,12 @@ function spawnLogged(command, args, options) {
 }
 
 async function launch(lane) {
+  if (existsSync(statePath())) {
+    throw new Error(`An instance is already recorded at ${statePath()}. Run: control-clicksmith cleanup`);
+  }
   const assigned = ports();
+  const wantsApi = lane === 'all' || lane === 'api';
+  const wantsUi = lane === 'all' || lane === 'ui';
   const state = {
     lane,
     createdAt: new Date().toISOString(),
@@ -95,42 +124,51 @@ async function launch(lane) {
     },
   };
 
-  if (lane === 'all' || lane === 'api') {
-    state.pids.push(
-      spawnLogged('npx', ['ts-node', '--transpile-only', 'src/index.ts'], {
-        cwd: join(repoRoot, 'backend'),
-        env: {
-          ...process.env,
-          PORT: String(assigned.backend),
-          IMAGE_SERVICE_URL: `http://127.0.0.1:${assigned.image}`,
-          CLIENT_URL: `http://127.0.0.1:${assigned.renderer}`,
-        },
-        logName: 'backend',
-      })
-    );
-    state.pids.push(
-      spawnLogged('python3', ['-m', 'flask', '--app', 'app.main', 'run', '--host', '127.0.0.1', '--port', String(assigned.image)], {
-        cwd: join(repoRoot, 'image-service'),
-        env: { ...process.env, PORT: String(assigned.image), PYTHONPATH: join(repoRoot, 'image-service') },
-        logName: 'image-service',
-      })
-    );
-    await waitFor(`${state.urls.backend}/health`);
-    await waitFor(`${state.urls.image}/health`);
-  }
+  const required = [
+    ...(wantsApi ? [assigned.backend, assigned.image] : []),
+    ...(wantsUi ? [assigned.renderer] : []),
+  ];
+  await Promise.all(required.map(assertPortFree));
 
-  if (lane === 'all' || lane === 'ui') {
-    state.pids.push(
-      spawnLogged('npx', ['vite', '--config', 'vite.renderer.config.ts', '--host', '127.0.0.1', '--port', String(assigned.renderer), '--strictPort'], {
-        cwd: join(repoRoot, 'client'),
-        env: { ...process.env, VITE_CLICKSMITH_VERIFY: 'true' },
-        logName: 'renderer',
-      })
-    );
-    await waitFor(state.urls.renderer);
+  const spawned = {};
+  if (wantsApi) {
+    spawned.backend = spawnLogged('npx', ['ts-node', '--transpile-only', 'src/index.ts'], {
+      cwd: join(repoRoot, 'backend'),
+      env: {
+        ...process.env,
+        PORT: String(assigned.backend),
+        IMAGE_SERVICE_URL: `http://127.0.0.1:${assigned.image}`,
+        CLIENT_URL: `http://127.0.0.1:${assigned.renderer}`,
+      },
+      logName: 'backend',
+    });
+    spawned.image = spawnLogged('python3', ['-m', 'flask', '--app', 'app.main', 'run', '--host', '127.0.0.1', '--port', String(assigned.image)], {
+      cwd: join(repoRoot, 'image-service'),
+      env: { ...process.env, PORT: String(assigned.image), PYTHONPATH: join(repoRoot, 'image-service') },
+      logName: 'image-service',
+    });
   }
-
+  if (wantsUi) {
+    spawned.renderer = spawnLogged('npx', ['vite', '--config', 'vite.renderer.config.ts', '--host', '127.0.0.1', '--port', String(assigned.renderer), '--strictPort'], {
+      cwd: join(repoRoot, 'client'),
+      env: { ...process.env, VITE_CLICKSMITH_VERIFY: 'true' },
+      logName: 'renderer',
+    });
+  }
+  state.pids = Object.values(spawned);
   writeState(state);
+
+  if (wantsApi) {
+    await waitFor(`${state.urls.backend}/health`);
+    assertAlive(spawned.backend);
+    await waitFor(`${state.urls.image}/health`);
+    assertAlive(spawned.image);
+  }
+  if (wantsUi) {
+    await waitFor(state.urls.renderer);
+    assertAlive(spawned.renderer);
+  }
+
   console.log(JSON.stringify(state, null, 2));
 }
 
@@ -230,12 +268,19 @@ async function driveManagerControls(headed) {
   await page.locator('[data-testid="save-run-name"]').fill('Verify Manager Run');
   await page.locator('[data-testid="save-run-confirm"]').click();
   await page.locator('[data-testid="save-run-modal"]').waitFor({ state: 'detached' });
-  await page.getByText('Verify Manager Run').waitFor();
+  const savedCard = page.locator('[data-testid^="profile-card-"]', { hasText: 'Verify Manager Run' });
+  await savedCard.waitFor();
+  await savedCard.evaluate(element => Promise.all(element.getAnimations().map(animation => animation.finished)));
+  const savedOpacity = await savedCard.evaluate(element => getComputedStyle(element).opacity);
+  if (savedOpacity !== '1') {
+    throw new Error(`Saved profile card is not fully visible (opacity ${savedOpacity})`);
+  }
   await page.screenshot({ path: join(shotDir, 'saved.png'), fullPage: true });
   const proof = {
     feature: 'manager-controls',
     url: state.urls.renderer,
     recChip: await recChip.innerText(),
+    savedProfile: (await savedCard.innerText()).split('\n')[0],
     profileVisible: true,
     artifacts: [
       join(shotDir, 'idle.png'),
