@@ -228,7 +228,7 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
     preferred = [round(scale_hint, 3), round(min_scale, 3), round(max_scale, 3)]
     # When hint is near 1.0, aggressively probe browser zoom pivots early.
     if abs(scale_hint - 1.0) <= 0.08:
-        preferred.extend([0.8, 1.25, 0.75, 1.33, 0.67, 1.5, 1.67, 2.0])
+        preferred.extend([1.1, 0.9, 0.8, 1.25, 0.75, 1.33, 0.67, 1.5, 1.67, 2.0])
 
     ordered = []
     seen = set()

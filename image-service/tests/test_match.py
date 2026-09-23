@@ -77,7 +77,7 @@ def assert_click_on_embedded_patch(match, template, scale, tolerance=8):
     assert abs(float(match["y"]) - center_y) <= tolerance
 
 
-def post_match(client, template, search, threshold=0.55, min_scale=0.7, max_scale=1.4, scale_hint=1.0, method="template", find_all=False, max_matches=1):
+def post_match(client, template, search, threshold=0.55, min_scale=0.7, max_scale=1.4, scale_hint=1.0, method="template", find_all=False, max_matches=1, max_budget_ms=180):
     payload = {
         "template": to_base64(template),
         "searchArea": to_base64(search),
@@ -88,7 +88,7 @@ def post_match(client, template, search, threshold=0.55, min_scale=0.7, max_scal
         "minScale": min_scale,
         "maxScale": max_scale,
         "scaleHint": scale_hint,
-        "maxBudgetMs": 180,
+        "maxBudgetMs": max_budget_ms,
     }
     return client.post("/match", json=payload)
 
@@ -410,6 +410,7 @@ def test_template_at_125_percent_still_clicks_the_scaled_center():
         max_scale=1.4,
         scale_hint=1.0,
         method="template",
+        max_budget_ms=260,
     )
     assert res.status_code == 200
     data = res.get_json()
@@ -420,6 +421,35 @@ def test_template_at_125_percent_still_clicks_the_scaled_center():
     assert abs(float(match["scale"]) - scale) <= 0.08
     assert abs(float(match["x"]) - center_x) <= 8
     assert abs(float(match["y"]) - center_y) <= 8
+
+
+def test_template_at_110_and_90_percent_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(96)
+    for scale, origin in ((1.1, (40, 50)), (0.9, (40, 50))):
+        search = embed_scaled_template(template, scale, canvas_size=640, origin=origin)
+        res = post_match(
+            client,
+            template,
+            search,
+            threshold=0.25,
+            min_scale=0.7,
+            max_scale=1.4,
+            scale_hint=1.0,
+            method="template",
+            max_budget_ms=180,
+        )
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["success"] is True
+        match = data["bestMatch"]
+        center_x, center_y = expected_center(template, scale, origin)
+        assert float(match["confidence"]) > 0.6
+        assert abs(float(match["scale"]) - scale) <= 0.08
+        assert abs(float(match["x"]) - center_x) <= 8
+        assert abs(float(match["y"]) - center_y) <= 8
+        assert int(data["processingTimeMs"]) <= 180
 
 
 def test_patch_on_a_desktop_sized_image_clicks_the_far_center():
