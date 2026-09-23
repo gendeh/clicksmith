@@ -12,6 +12,7 @@
 #include <mutex>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -33,6 +34,11 @@ constexpr int kStatusPort = 27737;
 constexpr double kTickHz = 240.0;
 constexpr double kTickMs = 1000.0 / kTickHz;
 constexpr double kTakeoverPauseGuardMs = 700.0;
+constexpr std::string_view kAdapterVersion = "0.2.7";
+constexpr std::string_view kProtocolVersion = "2.0.0";
+#ifndef CLICKSMITH_ADAPTER_BUILD_ID
+#define CLICKSMITH_ADAPTER_BUILD_ID "0.2.7+dev"
+#endif
 
 #ifdef _WIN32
 using SocketHandle = SOCKET;
@@ -114,8 +120,10 @@ bool gButtonDown[2][3] = {{false, false, false}, {false, false, false}};
 
 // These are only accessed on the game thread.
 double gGameTimeMs = 0.0;
-double gGameRemainderMs = 0.0;
 std::int64_t gGameTick = 0;
+std::int64_t gLastFreezeTick = 0;
+std::uint64_t gLastFreezeRunId = 0;
+std::size_t gLastFreezeReplayIndex = 0;
 std::int64_t gRecordStartTick = 0;
 std::int64_t gReplayStartTick = 0;
 std::size_t gReplayIndex = 0;
@@ -131,11 +139,17 @@ double gTakeoverInputIgnoreUntilMs = 0.0;
 bool gReplayWasActiveBeforePause = false;
 bool gBlockTakeoverUntilReplayDispatch = false;
 bool gSkipNextDtAfterUnpause = false;
+bool gDeathLatch = false;
 std::int64_t gReplayPhaseTicks = 0;
+std::atomic<std::uint64_t> gProcessCommandsCount{0};
+std::atomic<std::uint64_t> gProcessQueuedButtonsCount{0};
 
 void startRecording();
 void stopReplay();
 void startReplay();
+void dispatchDueReplayEvents(std::int64_t elapsedTicks);
+void tryDispatchReplay();
+bool didAnyPlayerDie();
 
 std::uint64_t unixNowMs() {
   using namespace std::chrono;
@@ -214,6 +228,20 @@ double tickToMs(std::int64_t tick) {
   return static_cast<double>(tick) * kTickMs;
 }
 
+std::int64_t currentProgressTick() {
+  auto* layer = gActivePlayLayer ? gActivePlayLayer : PlayLayer::get();
+  if (!layer) return std::max<std::int64_t>(0, gGameTick);
+  return std::max<std::int64_t>(0, static_cast<std::int64_t>(layer->m_gameState.m_currentProgress));
+}
+
+void syncProgressClock() {
+  gGameTick = currentProgressTick();
+}
+
+bool isReplayEventDue(const MacroEvent& event, std::int64_t elapsedTicks) {
+  return event.t_tick <= elapsedTicks;
+}
+
 void closeSocket(SocketHandle handle) {
 #ifdef _WIN32
   if (handle != kInvalidSocket) {
@@ -276,6 +304,7 @@ bool stringToButton(std::string_view value, PlayerButton& out) {
 matjson::Value eventToJson(const MacroEvent& event) {
   auto obj = matjson::Value::object();
   obj["t_ms"] = event.t_ms;
+  obj["t_tick"] = static_cast<double>(event.t_tick);
   obj["button"] = buttonToString(event.button);
   obj["down"] = event.down;
   obj["player2"] = event.player2;
@@ -288,8 +317,9 @@ std::string buildStatusPayload() {
   payload["id"] = "geode-geometry-dash";
   payload["name"] = "Clicksmith Geode Adapter";
   payload["game"] = "Geometry Dash";
-  payload["version"] = "0.2.5";
-  payload["protocol_version"] = "1.0.0";
+  payload["version"] = std::string(kAdapterVersion);
+  payload["protocol_version"] = std::string(kProtocolVersion);
+  payload["build_id"] = CLICKSMITH_ADAPTER_BUILD_ID;
   payload["timing_domain"] = "tick";
   payload["boundary_policy"] = "attempt_boundary_only";
   payload["pause_policy"] = "freeze_no_dispatch";
@@ -301,10 +331,17 @@ std::string buildStatusPayload() {
   payload["capabilities"] = caps;
   payload["tick_hz"] = 240;
   payload["game_tick"] = static_cast<double>(gGameTick);
+  payload["replay_start_tick"] = static_cast<double>(gReplayStartTick);
   payload["replay_index"] = static_cast<double>(gReplayIndex);
   payload["attempt_serial"] = static_cast<double>(gAttemptSerial);
   payload["replay_run_id"] = static_cast<double>(gReplayRunId.load());
   payload["replay_phase_ticks"] = static_cast<double>(gReplayPhaseTicks);
+  payload["last_freeze_tick"] = static_cast<double>(gLastFreezeTick);
+  payload["last_freeze_run_id"] = static_cast<double>(gLastFreezeRunId);
+  payload["last_freeze_replay_index"] = static_cast<double>(gLastFreezeReplayIndex);
+  payload["process_commands_count"] = static_cast<double>(gProcessCommandsCount.load());
+  payload["process_queued_buttons_count"] = static_cast<double>(gProcessQueuedButtonsCount.load());
+  payload["dispatch_seam"] = "processQueuedButtons";
   payload["record_active"] = gRecordActive.load();
   payload["record_armed"] = gRecordArmed.load();
   payload["record_complete"] = gRecordComplete.load();
@@ -557,8 +594,26 @@ bool parseEventsFromJson(const matjson::Value& root, std::vector<MacroEvent>& ou
     if (event.t_ms < 0.0) {
       event.t_ms = 0.0;
     }
-    event.t_ms = snapToTick(event.t_ms);
-    event.t_tick = msToTick(event.t_ms);
+    bool hasExplicitTick = false;
+    auto tickIntRes = item["t_tick"].asInt();
+    if (tickIntRes.isOk()) {
+      event.t_tick = std::max<std::int64_t>(0, static_cast<std::int64_t>(tickIntRes.unwrap()));
+      hasExplicitTick = true;
+    } else {
+      auto tickDoubleRes = item["t_tick"].asDouble();
+      if (tickDoubleRes.isOk() && std::isfinite(tickDoubleRes.unwrap())) {
+        event.t_tick = std::max<std::int64_t>(0, static_cast<std::int64_t>(std::llround(tickDoubleRes.unwrap())));
+        hasExplicitTick = true;
+      }
+    }
+    if (hasExplicitTick) {
+      event.t_ms = tickToMs(event.t_tick);
+    } else if (tRes.isOk() || item["t_ms"].asInt().isOk()) {
+      event.t_tick = msToTick(event.t_ms);
+      event.t_ms = tickToMs(event.t_tick);
+    } else {
+      return false;
+    }
     auto downRes = item["down"].asBool();
     if (downRes.isOk()) {
       event.down = downRes.unwrap();
@@ -1077,12 +1132,32 @@ void stopRecording() {
   setRecordState(RecordState::Idle, "record_live_stopped");
 }
 
+void dispatchDueReplayEvents(std::int64_t elapsedTicks) {
+  while (gReplayIndex < gReplayEvents.size()) {
+    const auto& event = gReplayEvents[gReplayIndex];
+    if (!isReplayEventDue(event, elapsedTicks)) break;
+    dispatchReplayEvent(event);
+    appendReplayDispatchSample(gReplayIndex, event, elapsedTicks);
+    gBlockTakeoverUntilReplayDispatch = false;
+    gReplayIndex += 1;
+  }
+}
+
+void tryDispatchReplay() {
+  auto* layer = gActivePlayLayer ? gActivePlayLayer : PlayLayer::get();
+  if (!layer || !gReplayActive.load() || layer->m_isPaused || layer->m_hasCompletedLevel || didAnyPlayerDie()) {
+    return;
+  }
+  syncProgressClock();
+  const std::int64_t elapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
+  dispatchDueReplayEvents(elapsedTicks);
+}
+
 void startReplay() {
   std::lock_guard<std::mutex> lock(gMacroMutex);
   gReplayEvents = gPendingReplayEvents;
   for (auto& event : gReplayEvents) {
-    event.t_ms = snapToTick(std::max(0.0, event.t_ms));
-    event.t_tick = msToTick(event.t_ms);
+    event.t_ms = tickToMs(event.t_tick);
   }
   std::sort(gReplayEvents.begin(), gReplayEvents.end(), [](const MacroEvent& a, const MacroEvent& b) {
     if (a.t_tick != b.t_tick) return a.t_tick < b.t_tick;
@@ -1092,6 +1167,7 @@ void startReplay() {
   gReplayRunId.fetch_add(1);
   clearReplayTelemetry();
   gReplayIndex = 0;
+  syncProgressClock();
   gReplayStartTick = gGameTick + gReplayPhaseTicks;
   gIgnoreNextTakeoverInput = false;
   gBlockTakeoverUntilReplayDispatch = false;
@@ -1106,14 +1182,7 @@ void startReplay() {
   // Phase-lock: dispatch all t_tick <= 0 events immediately at start so run
   // alignment does not depend on the first post-boundary update frame.
   const std::int64_t startElapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
-  while (hasEvents && gReplayIndex < gReplayEvents.size()) {
-    const auto& event = gReplayEvents[gReplayIndex];
-    if (event.t_tick > startElapsedTicks) break;
-    dispatchReplayEvent(event);
-    appendReplayDispatchSample(gReplayIndex, event, startElapsedTicks);
-    gBlockTakeoverUntilReplayDispatch = false;
-    gReplayIndex += 1;
-  }
+  dispatchDueReplayEvents(startElapsedTicks);
   if (hasEvents && gReplayIndex >= gReplayEvents.size()) {
     gReplayActive.store(false);
     gReplaySessionActive.store(false);
@@ -1144,7 +1213,7 @@ void startArmedActionsAtAttemptBoundary() {
   }
 
   gGameTimeMs = 0.0;
-  gGameRemainderMs = 0.0;
+  syncProgressClock();
   gGameTick = 0;
   gRecordStartTick = 0;
   gReplayStartTick = 0;
@@ -1178,6 +1247,18 @@ bool didAnyPlayerDie() {
 }
 
 class $modify(GJBaseGameLayer) {
+  void processCommands(float dt, bool isHalfTick, bool isLastTick) {
+    gProcessCommandsCount.fetch_add(1);
+    tryDispatchReplay();
+    GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
+  }
+
+  void processQueuedButtons(float dt, bool clearInputQueue) {
+    gProcessQueuedButtonsCount.fetch_add(1);
+    tryDispatchReplay();
+    GJBaseGameLayer::processQueuedButtons(dt, clearInputQueue);
+  }
+
   void update(float dt) {
     GJBaseGameLayer::update(dt);
     auto current = PlayLayer::get();
@@ -1232,7 +1313,6 @@ class $modify(GJBaseGameLayer) {
         }
         gActivePlayLayer = current;
         gGameTimeMs = 0.0;
-        gGameRemainderMs = 0.0;
         gGameTick = 0;
         gRecordStartTick = 0;
         gReplayStartTick = 0;
@@ -1253,6 +1333,7 @@ class $modify(GJBaseGameLayer) {
         gRecordStopRequested.store(false);
         gReplayStopRequested.store(false);
         gAttemptBoundaryPending = false;
+        gDeathLatch = false;
         gWasPaused = false;
         gPauseStartedGameMs = 0.0;
         setReplayState(ReplayState::Idle, "level_context_changed");
@@ -1334,11 +1415,7 @@ class $modify(GJBaseGameLayer) {
         gSkipNextDtAfterUnpause = false;
       }
       gGameTimeMs += dtMs;
-      gGameRemainderMs += dtMs;
-      while (gGameRemainderMs + 1e-9 >= kTickMs) {
-        gGameRemainderMs -= kTickMs;
-        gGameTick += 1;
-      }
+      syncProgressClock();
     }
 
     // While paused, do not advance replay/record state via death/complete checks.
@@ -1381,23 +1458,47 @@ class $modify(GJBaseGameLayer) {
     // Important: if replay is only armed (not yet active), keep it armed so
     // it can start on the next attempt boundary.
     if (didAnyPlayerDie()) {
-      gReplayStopRequested.store(false);
-      if (gReplayActive.load()) {
-        stopReplay();
+      if (!gDeathLatch) {
+        gDeathLatch = true;
+        gReplayStopRequested.store(false);
+        const bool replayWasLive = gReplayActive.load();
+        const bool replayWasRequested = replayWasLive || gReplayArmed.load() || gReplaySessionActive.load();
+        if (replayWasLive) {
+          gLastFreezeTick = currentProgressTick();
+          gLastFreezeRunId = gReplayRunId.load();
+          gLastFreezeReplayIndex = gReplayIndex;
+          stopReplay();
+        }
+        if (replayWasRequested) {
+          bool canRearm = false;
+          {
+            std::lock_guard<std::mutex> lock(gMacroMutex);
+            if (gPendingReplayEvents.empty() && !gReplayEvents.empty()) {
+              gPendingReplayEvents = gReplayEvents;
+            }
+            canRearm = !gPendingReplayEvents.empty();
+          }
+          if (canRearm) {
+            gReplayArmed.store(true);
+            gReplaySessionActive.store(true);
+            const std::int64_t nextSerial = gAttemptBoundaryPending ? gAttemptSerial : gAttemptSerial + 1;
+            gReplayStartBoundarySerial = nextSerial;
+            setReplayState(ReplayState::Armed, "replay_rearm_after_death");
+          }
+        }
+        if (gRecordActive.load()) {
+          stopRecording();
+          gRecordArmed.store(false);
+        }
+        if (gRecordArmed.load()) {
+          setRecordState(RecordState::Armed, "record_kept_armed_after_death");
+        } else {
+          setRecordState(RecordState::Idle, "record_idle_after_death");
+        }
+        gTakeoverArmed.store(false);
       }
-      if (gRecordActive.load()) {
-        stopRecording();
-        // Active recording should not stay armed after finalize.
-        gRecordArmed.store(false);
-      }
-      if (gRecordArmed.load()) {
-        setRecordState(RecordState::Armed, "record_kept_armed_after_death");
-      } else {
-        setRecordState(RecordState::Idle, "record_idle_after_death");
-      }
-      // Keep record_armed across death when recording is not yet active, so
-      // F9 arm can start on the next attempt boundary.
-      gTakeoverArmed.store(false);
+    } else {
+      gDeathLatch = false;
     }
 
     if (levelCompleted) {
@@ -1413,15 +1514,6 @@ class $modify(GJBaseGameLayer) {
     }
 
     if (gReplayActive.load()) {
-      const std::int64_t elapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
-      while (gReplayIndex < gReplayEvents.size()) {
-        const auto& event = gReplayEvents[gReplayIndex];
-        if (event.t_tick > elapsedTicks) break;
-        dispatchReplayEvent(event);
-        appendReplayDispatchSample(gReplayIndex, event, elapsedTicks);
-        gBlockTakeoverUntilReplayDispatch = false;
-        gReplayIndex += 1;
-      }
       if (gReplayIndex >= gReplayEvents.size()) {
         gReplayActive.store(false);
         gReplaySessionActive.store(false);

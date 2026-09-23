@@ -12,7 +12,7 @@ Clicksmith is an overlay-first input recorder. Users touch three surfaces. Pick 
 | `ui` | Profile Manager + overlay renderer at the Vite URL | Yes, via the verify bridge | Playwright or computer-use against `data-testid` handles |
 | `api` | Express backend `:3000` and Flask image-service `:5001` | Yes | HTTP request + response body |
 | `desktop` | Real Electron + OS hooks (`uiohook-napi`, `robotjs`) | No | Native record/playback on macOS/Windows |
-| `game` | Geode adapter talking to Geometry Dash on `127.0.0.1:27737` | No | Adapter `/status` while GD is running |
+| `game` | Geode adapter talking to Geometry Dash on `127.0.0.1:27737` | No | Adapter `/status` while GD is running. Freeze-tick replay is `npm run verify:geode-freeze` |
 
 The verify renderer is the real React manager, not a separate mock app. `VITE_CLICKSMITH_VERIFY=true` installs an in-page IPC bridge only when `window.clicksmith` is missing, so Electron preload still wins on desktop. Native mouse/keyboard injection is out of scope for lane `ui`.
 
@@ -102,6 +102,7 @@ Proof standards:
 - HTTP proof: method, URL, status, and response body. For mutations, follow with a GET of the stored value.
 - Side effects: a saved profile must reappear after reload or in `GET /api/v1/profiles`.
 - Desktop/game lanes: if the machine cannot open Electron or Geometry Dash, write `SKIP desktop` or `SKIP game` with the attempted command and the unmet precondition. Do not substitute lane `ui` proof.
+- Geometry Dash freeze-tick replay: `npm run verify:geode-freeze` (also `control-clicksmith drive geode-freeze`). It POSTs `geode-adapter/fixtures/back-on-track-macro.json` at least 8 times and asserts one freeze tick. Unreachable adapter prints `SKIP game` and `curl -sS -m 3 http://127.0.0.1:27737/status`. A loaded dylib whose `protocol_version` is not `2.0.0` is a hard fail, not a skip.
 
 Artifact location: `.cursor/skills/verify-clicksmith/artifacts/<feature-id>/`. Keep `proof.json` plus screenshots or HTTP dumps. These files survive cleanup.
 

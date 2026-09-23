@@ -25,6 +25,7 @@ import { RunLifecycleEventType, RunLifecycleManager } from './runLifecycle';
 import { RunTraceLogger } from './runTrace';
 import { mergeTakeoverEvents } from './takeoverMerge';
 import { isReplayLive, isReplaySignalActive, ModStatusResponse, validateModStatusPayload } from './modProtocol';
+import { adapterProtocolMismatch, resolveTickStamp, type TickStamp } from './replayContract';
 
 let mainWindow: BrowserWindow | null = null;
 let overlayWindow: BrowserWindow | null = null;
@@ -559,6 +560,7 @@ function startModStatePolling(baseUrl: string, totalEvents = 0) {
 
 type ModMacroEvent = {
   t_ms: number;
+  t_tick: number;
   button: string;
   down: boolean;
   player2?: boolean;
@@ -736,7 +738,9 @@ function convertModEventsToRecordedEvents(events: ModMacroEvent[]): RecordedEven
           button: start.button,
           player2: start.player2 ?? false,
           action: 'down',
+          t_tick: start.t_tick,
           release_t_ms: event.t_ms,
+          release_t_tick: event.t_tick,
         },
       });
     } else {
@@ -756,6 +760,7 @@ function convertModEventsToRecordedEvents(events: ModMacroEvent[]): RecordedEven
           button: event.button,
           player2: event.player2 ?? false,
           action: 'up',
+          t_tick: event.t_tick,
         },
       });
     }
@@ -778,6 +783,7 @@ function convertModEventsToRecordedEvents(events: ModMacroEvent[]): RecordedEven
         button: event.button,
         player2: event.player2 ?? false,
         action: 'down',
+        t_tick: event.t_tick,
       },
     });
   }
@@ -786,10 +792,12 @@ function convertModEventsToRecordedEvents(events: ModMacroEvent[]): RecordedEven
 }
 
 function convertRecordedEventsToModEvents(events: RecordedEvent[]): ModMacroEvent[] {
-  const tickMs = 1000 / 240;
-  const snapToTick = (value: number) => {
-    if (!Number.isFinite(value) || value <= 0) return 0;
-    return Math.round(value / tickMs) * tickMs;
+  const stamp = (tMs: number, tTick?: unknown): TickStamp => {
+    const resolved = resolveTickStamp(tMs, tTick);
+    if (!resolved) {
+      throw new Error('replay_event_missing_t_tick');
+    }
+    return resolved;
   };
   const rawEvents: ModMacroEvent[] = [];
   events.forEach(event => {
@@ -832,29 +840,30 @@ function convertRecordedEventsToModEvents(events: RecordedEvent[]): ModMacroEven
 
     // Preserve raw Geode edge events without creating synthetic jumps.
     if (source === 'geode' && action === 'up' && durationMs <= 0) {
-      rawEvents.push({ t_ms: snapToTick(event.t_ms), button, down: false, player2 });
+      rawEvents.push({ ...stamp(event.t_ms, metadata?.t_tick), button, down: false, player2 });
       return;
     }
 
-    rawEvents.push({ t_ms: snapToTick(event.t_ms), button, down: true, player2 });
+    rawEvents.push({ ...stamp(event.t_ms, metadata?.t_tick), button, down: true, player2 });
 
     if (source === 'geode' && action === 'down') {
       if (typeof releaseAt === 'number' && releaseAt >= event.t_ms) {
-        rawEvents.push({ t_ms: snapToTick(releaseAt), button, down: false, player2 });
+        rawEvents.push({ ...stamp(releaseAt, metadata?.release_t_tick), button, down: false, player2 });
       } else if (durationMs > 0) {
-        rawEvents.push({ t_ms: snapToTick(event.t_ms + durationMs), button, down: false, player2 });
+        rawEvents.push({ ...stamp(event.t_ms + durationMs), button, down: false, player2 });
       }
       return;
     }
 
     if (durationMs > 0) {
-      rawEvents.push({ t_ms: snapToTick(event.t_ms + durationMs), button, down: false, player2 });
+      rawEvents.push({ ...stamp(event.t_ms + durationMs), button, down: false, player2 });
     } else {
-      rawEvents.push({ t_ms: snapToTick(event.t_ms), button, down: false, player2 });
+      rawEvents.push({ ...stamp(event.t_ms, metadata?.t_tick), button, down: false, player2 });
     }
   });
 
   const sorted = rawEvents.sort((a, b) => {
+    if (a.t_tick !== b.t_tick) return a.t_tick - b.t_tick;
     if (a.t_ms !== b.t_ms) return a.t_ms - b.t_ms;
     if (a.down === b.down) return 0;
     return a.down ? -1 : 1;
@@ -1130,8 +1139,26 @@ async function startModPlayback(profile: Profile): Promise<{ success: boolean; e
   lastPlaybackLeadInMs = 0;
   pendingTakeoverProfile = null;
   // Always clear any stale replay arm/state before arming a fresh replay.
+  const status = await modGetStatus(baseUrl);
+  const stale = adapterProtocolMismatch(status?.protocol_version);
+  if (stale) {
+    broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', 0, stale));
+    return { success: false, error: stale };
+  }
   await modRequest<ModStatusResponse>(baseUrl, '/replay/stop').catch(() => null);
-  const modEvents = convertRecordedEventsToModEvents(profile.events);
+  let modEvents: ModMacroEvent[];
+  try {
+    modEvents = convertRecordedEventsToModEvents(profile.events);
+  } catch (error: any) {
+    const errorText = error?.message ?? 'replay_event_missing_t_tick';
+    broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', 0, errorText));
+    return { success: false, error: errorText };
+  }
+  if (modEvents.length === 0 || modEvents.some(event => !Number.isFinite(event.t_tick))) {
+    const errorText = 'profile is not a tick-domain Geode replay contract';
+    broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', 0, errorText));
+    return { success: false, error: errorText };
+  }
   activeModPlaybackEvents = modEvents;
   const response = await modRequest<ModStatusResponse>(baseUrl, '/replay/start', { events: modEvents });
   if (!response.ok) {

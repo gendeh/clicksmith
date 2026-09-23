@@ -1,0 +1,93 @@
+{
+  "ok": true,
+  "run_count": 8,
+  "freeze_tick": 3010,
+  "ticks": [
+    3010,
+    3010,
+    3010,
+    3010,
+    3010,
+    3010,
+    3010,
+    3010
+  ],
+  "spread": 0,
+  "version": "0.2.7",
+  "protocol_version": "2.0.0",
+  "build_id": "0.2.7+20260923T052240",
+  "runs": [
+    {
+      "run": 1,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 3,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 2,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 4,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 3,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 5,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 4,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 6,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 5,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 7,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 6,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 8,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 7,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 9,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    },
+    {
+      "run": 8,
+      "freeze_tick": 3010,
+      "replay_index": 20,
+      "replay_run_id": 10,
+      "protocol_version": "2.0.0",
+      "version": "0.2.7",
+      "build_id": "0.2.7+20260923T052240"
+    }
+  ]
+}

@@ -24,6 +24,7 @@
     "lint:backend": "cd backend && npm run lint",
     "check:boundaries": "bash scripts/check-boundaries.sh",
     "verify:install": "npm --prefix .cursor/skills/verify-clicksmith install",
+    "verify:geode-freeze": "node scripts/verify-geode-freeze-ticks.js",
     "package": "cd client && npm run package",
     "installer": "cd installer && makensis clicksmith.nsi"
   },
