@@ -2145,4 +2145,32 @@ describe('PlaybackEngine', () => {
     screenSpy.mockRestore();
     jest.useRealTimers();
   });
+
+  test('the first click does not wait past the match deadline', async () => {
+    jest.useFakeTimers();
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }) } as any,
+    }) as any;
+    engine.status = engine.createStatus('playing');
+    engine.smartClickPromises.set(0, new Promise(() => {}));
+    engine.smartClickTelemetry.set(0, { open: true });
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: 40,
+      y: 30,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: 'patch',
+    };
+    const pending = engine.getSmartClickCoords(0, event, { x: 40, y: 30 });
+    await jest.advanceTimersByTimeAsync(460);
+    await expect(pending).resolves.toEqual({ x: 40, y: 30 });
+    expect(engine.smartClickTelemetry.get(0).open).toBe(false);
+    jest.useRealTimers();
+  });
 });

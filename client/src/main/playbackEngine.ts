@@ -522,38 +522,45 @@ export class PlaybackEngine extends EventEmitter {
             return cached.coords;
         }
 
-        const warmupMode = this.smartClickAnchor === null;
-        const isTailAction = this.actions.length > 3 && index >= this.actions.length - 2;
         const inflight = this.smartClickPromises.get(index);
         if (inflight) {
-            try {
-                if (warmupMode || isTailAction) {
-                    return await inflight;
-                }
-                const coords = await Promise.race([
-                    inflight,
-                    new Promise<null>((resolve) =>
-                        setTimeout(() => resolve(null), PlaybackEngine.SMART_CLICK_AWAIT_TIMEOUT_MS)
-                    ),
-                ]);
-                if (coords) return coords;
-                const telemetry = this.smartClickTelemetry.get(index);
-                if (telemetry) telemetry.open = false;
-                this.status = { ...this.status, retries: this.status.retries + 1 };
-                this.degradeSmartClickAnchor();
-                return this.applySmartClickAnchor(expected);
-            } catch {
-                this.degradeSmartClickAnchor();
-                return expected;
-            }
+            return this.finishSmartClickWait(inflight, expected, this.smartClickTelemetry.get(index));
         }
 
-        // If prefetch was skipped (e.g. rapid sequences), still run SmartClick.
+        const telemetry = { open: true };
+        return this.finishSmartClickWait(
+            this.resolveSmartClick(event, expected, true, telemetry),
+            expected,
+            telemetry
+        );
+    }
+
+    private async finishSmartClickWait(
+        work: Promise<{ x: number; y: number }>,
+        expected: { x: number; y: number },
+        telemetry?: { open: boolean }
+    ): Promise<{ x: number; y: number }> {
+        let timer: NodeJS.Timeout | null = null;
         try {
-            return await this.resolveSmartClick(event, expected);
+            const coords = await Promise.race([
+                work,
+                new Promise<null>((resolve) => {
+                    timer = this.clock.setTimeout(
+                        () => resolve(null),
+                        PlaybackEngine.SMART_CLICK_AWAIT_TIMEOUT_MS
+                    );
+                }),
+            ]);
+            if (coords) return coords;
+            if (telemetry) telemetry.open = false;
+            this.status = { ...this.status, retries: this.status.retries + 1 };
+            this.degradeSmartClickAnchor();
+            return this.applySmartClickAnchor(expected);
         } catch {
             this.degradeSmartClickAnchor();
             return expected;
+        } finally {
+            if (timer) this.clock.clearTimeout(timer);
         }
     }
 
