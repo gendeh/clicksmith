@@ -3411,6 +3411,89 @@ describe('PlaybackEngine', () => {
     screenSpy.mockRestore();
   });
 
+  test('a modest match of a scaled wide button clicks the matched rectangle', async () => {
+    const sharp = require('sharp');
+    const width = 80;
+    const height = 24;
+    const raw = Buffer.alloc(width * height * 3);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const i = (y * width + x) * 3;
+        raw[i] = (x * 17 + y * 3) % 256;
+        raw[i + 1] = (x * 5 + 40) % 256;
+        raw[i + 2] = (y * 19 + x) % 256;
+      }
+    }
+    const template = await sharp(raw, { raw: { width, height, channels: 3 } }).png().toBuffer();
+    const scaledW = Math.round(width * 0.67);
+    const scaledH = Math.round(height * 0.67);
+    const scaled = await sharp(template).resize(scaledW, scaledH).png().toBuffer();
+    const origin = { x: 40, y: 50 };
+    const search = await sharp({
+      create: { width: 200, height: 200, channels: 3, background: { r: 245, g: 245, b: 245 } },
+    })
+      .composite([{ input: scaled, left: origin.x, top: origin.y }])
+      .png()
+      .toBuffer();
+    const recordedHash = await computeDHash(template);
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(search);
+    const recorded = { x: 400, y: 400 };
+    const match = {
+      x: origin.x + scaledW / 2,
+      y: origin.y + scaledH / 2,
+      confidence: 0.67,
+      method: 'template' as const,
+      scale: 0.67,
+      bounds: { x: origin.x, y: origin.y, width: scaledW, height: scaledH },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 12,
+        }),
+      } as any,
+      windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'screen',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      imageSearchRadius: 100,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse' as const,
+        btn: 'left' as const,
+        x: recorded.x,
+        y: recorded.y,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: template.toString('base64'),
+        metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+      },
+      recorded
+    );
+    const region = captureSpy.mock.calls[0]?.[0] as { x: number; y: number };
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+    expect(result.x).toBe(Math.round(region.x + match.x));
+    expect(result.y).toBe(Math.round(region.y + match.y));
+    expect(engine.getStatus().smartClickLastSource).toBe('region');
+    expect(engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.67);
+  });
+
   test('a screen target uses the context image when the small patch is gone', async () => {
     const sharp = require('sharp');
     const checker = Buffer.alloc(96 * 96 * 3);

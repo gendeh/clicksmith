@@ -228,22 +228,22 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
     preferred = [round(scale_hint, 3), round(min_scale, 3), round(max_scale, 3)]
     # When hint is near 1.0, aggressively probe browser zoom pivots early.
     if abs(scale_hint - 1.0) <= 0.08:
-        preferred.extend([1.1, 0.9, 1.2, 0.8, 1.25, 0.75, 1.33, 0.67, 1.5, 1.67, 2.0])
+        preferred.extend([1.1, 0.9, 1.2, 0.67, 0.8, 1.25, 0.75, 1.33, 1.5, 1.67, 2.0])
 
     ordered = []
     seen = set()
 
-    def _push(value):
+    def _push(value, slack=0.0):
         rounded = round(value, 3)
         if rounded in seen:
             return
-        if rounded < min_scale or rounded > max_scale:
+        if rounded < min_scale - slack or rounded > max_scale + slack:
             return
         seen.add(rounded)
         ordered.append(rounded)
 
     for value in preferred:
-        _push(value)
+        _push(value, 0.05)
 
     for value in sorted(in_range_common, key=lambda scale: (abs(scale - scale_hint), abs(scale - 1.0))):
         _push(value)
@@ -255,6 +255,7 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
 
 
 DECISIVE_TEMPLATE_CONFIDENCE = 0.92
+CLICKABLE_TEMPLATE_CONFIDENCE = 0.6
 HOPELESS_TEMPLATE_CONFIDENCE = 0.30
 FLAT_SCALE_SCORE_TIE = 0.02
 
@@ -355,6 +356,9 @@ def match_template_multiscale(
             if candidate_matches:
                 collected.extend(candidate_matches)
             if best_match and score_of(best_match) >= DECISIVE_TEMPLATE_CONFIDENCE:
+                stopped_on_decisive = True
+                break
+            if tried >= 6 and best_match and score_of(best_match) >= CLICKABLE_TEMPLATE_CONFIDENCE:
                 stopped_on_decisive = True
                 break
             if tried >= 5 and (best_match is None or score_of(best_match) < HOPELESS_TEMPLATE_CONFIDENCE):

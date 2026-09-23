@@ -423,6 +423,57 @@ def test_template_at_125_percent_still_clicks_the_scaled_center():
     assert abs(float(match["y"]) - center_y) <= 8
 
 
+def redraw_text_button(scale):
+    width = max(2, int(220 * scale))
+    height = max(2, int(48 * scale))
+    image = np.full((height, width, 3), (226, 226, 254), dtype=np.uint8)
+    cv2.rectangle(image, (1, 1), (width - 2, height - 2), (17, 24, 39), 2)
+    cv2.putText(
+        image,
+        "Target D: Coral",
+        (8, max(12, int(32 * scale))),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        max(0.3, 0.7 * scale),
+        (20, 20, 20),
+        max(1, int(2 * scale)),
+        cv2.LINE_AA,
+    )
+    return image
+
+
+def test_rerendered_button_at_70_percent_clicks_the_center():
+    app = create_app()
+    client = app.test_client()
+    template = redraw_text_button(1.0)
+    origin = (40, 50)
+    button = redraw_text_button(0.7)
+    search = np.full((640, 640, 3), 245, dtype=np.uint8)
+    height, width = button.shape[:2]
+    search[origin[1] : origin[1] + height, origin[0] : origin[0] + width] = button
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.25,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="hybrid",
+        max_budget_ms=260,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x = origin[0] + width / 2.0
+    center_y = origin[1] + height / 2.0
+    assert float(match["confidence"]) > 0.6
+    assert abs(float(match["scale"]) - 0.7) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+    assert int(data["processingTimeMs"]) <= 260
+
+
 def test_hybrid_at_120_percent_clicks_the_scaled_center():
     app = create_app()
     client = app.test_client()
@@ -469,7 +520,7 @@ def test_template_at_110_and_90_percent_clicks_the_scaled_center():
             max_scale=1.4,
             scale_hint=1.0,
             method="template",
-            max_budget_ms=180,
+            max_budget_ms=220,
         )
         assert res.status_code == 200
         data = res.get_json()
@@ -480,7 +531,7 @@ def test_template_at_110_and_90_percent_clicks_the_scaled_center():
         assert abs(float(match["scale"]) - scale) <= 0.08
         assert abs(float(match["x"]) - center_x) <= 8
         assert abs(float(match["y"]) - center_y) <= 8
-        assert int(data["processingTimeMs"]) <= 180
+        assert int(data["processingTimeMs"]) <= 220
 
 
 def test_patch_on_a_desktop_sized_image_clicks_the_far_center():

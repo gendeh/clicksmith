@@ -49,6 +49,7 @@ type SmartClickViableCandidate = {
     expectedDistance: number;
     inPreferredBounds: boolean;
     passesHashGate: boolean | undefined;
+    matchBounds?: { x: number; y: number; width: number; height: number };
 };
 type SmartClickAdaptationReason = 'bounds_change' | 'scale_shift_evidence' | 'failure_streak';
 
@@ -1180,6 +1181,46 @@ export class PlaybackEngine extends EventEmitter {
             .toBuffer();
     }
 
+    private async extractRectFromBuffer(
+        image: Buffer,
+        left: number,
+        top: number,
+        width: number,
+        height: number
+    ): Promise<Buffer> {
+        const sharp = this.getSharp();
+        const metadata = await sharp(image).metadata();
+        const imageWidth = metadata.width ?? 0;
+        const imageHeight = metadata.height ?? 0;
+        if (imageWidth <= 0 || imageHeight <= 0) {
+            throw new Error('invalid_image_dimensions');
+        }
+        const safeWidth = Math.max(1, Math.min(Math.round(width), imageWidth));
+        const safeHeight = Math.max(1, Math.min(Math.round(height), imageHeight));
+        const safeLeft = Math.max(0, Math.min(Math.round(left), imageWidth - safeWidth));
+        const safeTop = Math.max(0, Math.min(Math.round(top), imageHeight - safeHeight));
+        return sharp(image)
+            .extract({ left: safeLeft, top: safeTop, width: safeWidth, height: safeHeight })
+            .png()
+            .toBuffer();
+    }
+
+    private async recordedTemplateSize(
+        event: RecordedEvent
+    ): Promise<{ width: number; height: number } | null> {
+        const encoded = event.img_patch_b64;
+        if (!encoded) return null;
+        try {
+            const metadata = await this.getSharp()(Buffer.from(encoded, 'base64')).metadata();
+            const width = metadata.width ?? 0;
+            const height = metadata.height ?? 0;
+            if (width < 8 || height < 8) return null;
+            return { width, height };
+        } catch {
+            return null;
+        }
+    }
+
     private async recordedPatchSize(event: RecordedEvent): Promise<number> {
         const encoded = event.img_patch_b64;
         if (!encoded) return 128;
@@ -1200,7 +1241,8 @@ export class PlaybackEngine extends EventEmitter {
         x: number,
         y: number,
         hashSource?: { image: Buffer; offsetX: number; offsetY: number },
-        patchSize = 128
+        patchSize = 128,
+        matchedBounds?: { x: number; y: number; width: number; height: number }
     ): Promise<number | null> {
         const recordedHash = (event.metadata as Record<string, unknown> | undefined)?.img_dhash;
         if (typeof recordedHash !== 'string' || !recordedHash) {
@@ -1208,14 +1250,41 @@ export class PlaybackEngine extends EventEmitter {
         }
         const size = Math.max(8, Math.round(patchSize));
         try {
-            const patch = hashSource
-                ? await this.extractPatchFromBuffer(
-                      hashSource.image,
-                      Math.round(x - hashSource.offsetX),
-                      Math.round(y - hashSource.offsetY),
-                      size
-                  )
-                : await capturePatch(Math.round(x), Math.round(y), size);
+            let patch: Buffer;
+            const recorded = matchedBounds ? await this.recordedTemplateSize(event) : null;
+            if (
+                hashSource &&
+                matchedBounds &&
+                matchedBounds.width >= 8 &&
+                matchedBounds.height >= 8
+            ) {
+                patch = await this.extractRectFromBuffer(
+                    hashSource.image,
+                    matchedBounds.x,
+                    matchedBounds.y,
+                    matchedBounds.width,
+                    matchedBounds.height
+                );
+                if (
+                    recorded &&
+                    (Math.round(matchedBounds.width) !== recorded.width ||
+                        Math.round(matchedBounds.height) !== recorded.height)
+                ) {
+                    patch = await this.getSharp()(patch)
+                        .resize(recorded.width, recorded.height, { fit: 'fill' })
+                        .png()
+                        .toBuffer();
+                }
+            } else {
+                patch = hashSource
+                    ? await this.extractPatchFromBuffer(
+                          hashSource.image,
+                          Math.round(x - hashSource.offsetX),
+                          Math.round(y - hashSource.offsetY),
+                          size
+                      )
+                    : await capturePatch(Math.round(x), Math.round(y), size);
+            }
             const currentHash = await computeDHash(patch);
             return this.hammingDistanceHex(recordedHash, currentHash);
         } catch {
@@ -1387,6 +1456,7 @@ export class PlaybackEngine extends EventEmitter {
                   coords.y <= preferredBounds.y + preferredBounds.height
                 : false;
 
+            const bounds = candidate.bounds;
             viable.push({
                 coords,
                 confidence: candidate.confidence,
@@ -1398,6 +1468,18 @@ export class PlaybackEngine extends EventEmitter {
                 expectedDistance: jumpFromExpected,
                 inPreferredBounds,
                 passesHashGate: undefined,
+                matchBounds:
+                    method !== 'feature' &&
+                    bounds &&
+                    bounds.width >= 8 &&
+                    bounds.height >= 8
+                        ? {
+                              x: bounds.x,
+                              y: bounds.y,
+                              width: bounds.width,
+                              height: bounds.height,
+                          }
+                        : undefined,
             });
         }
 
@@ -1433,7 +1515,8 @@ export class PlaybackEngine extends EventEmitter {
                 candidate.coords.x,
                 candidate.coords.y,
                 hashSource,
-                patchSize
+                patchSize,
+                candidate.matchBounds
             );
             candidate.dhashDistance = distance;
             const maxDistance = this.getAdaptiveDHashMaxDistance(candidate.scale);
