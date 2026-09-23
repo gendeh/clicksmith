@@ -74,7 +74,7 @@ export class ImageService {
   }
 
   public async ocrImage(request: ImageOcrRequest): Promise<ImageOcrResponse> {
-    const timeoutMs = Math.max(150, Math.min(3000, request.timeoutMs ?? 900));
+    const timeoutMs = Math.max(0, Math.min(3000, request.timeoutMs ?? 900));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -107,7 +107,7 @@ export class ImageService {
   }
 
   private async requestMatch(request: ImageMatchRequest): Promise<ImageMatchResponse> {
-    const timeoutMs = Math.max(120, Math.min(2500, request.timeoutMs ?? 450));
+    const timeoutMs = Math.max(0, Math.min(2500, request.timeoutMs ?? 450));
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
