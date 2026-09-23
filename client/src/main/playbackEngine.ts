@@ -323,6 +323,12 @@ export class PlaybackEngine extends EventEmitter {
         if (!normalizedTarget || normalizedTarget === 'screen') {
             return null;
         }
+        const knownLookup = (this.windowManager as {
+            getKnownTargetBounds?: (target: string) => WindowBounds | null;
+        }).getKnownTargetBounds;
+        if (typeof knownLookup === 'function') {
+            return knownLookup.call(this.windowManager, this.config.target);
+        }
         try {
             return this.windowManager.getTargetBounds(this.config.target);
         } catch {
