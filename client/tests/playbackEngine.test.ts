@@ -1,6 +1,7 @@
 import { PlaybackEngine } from '../src/main/playbackEngine';
 import { PlaybackConfig, Profile } from '../src/types';
 import * as screenCapture from '../src/main/screenCapture';
+import { computeDHash } from '../src/main/imageHash';
 
 jest.mock('electron', () => ({
   screen: {
@@ -1153,5 +1154,78 @@ describe('PlaybackEngine', () => {
     expect(engine.getStatus().retries).toBe(0);
     captureSpy.mockRestore();
     screenSpy.mockRestore();
+  });
+
+  test('a match publishes source, confidence, dHash, and anchor', async () => {
+    const sharp = require('sharp');
+    const patch = await sharp({
+      create: {
+        width: 128,
+        height: 128,
+        channels: 3,
+        background: { r: 20, g: 40, b: 60 },
+      },
+    })
+      .png()
+      .toBuffer();
+    const recordedHash = await computeDHash(patch);
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(patch);
+    const match = {
+      x: 64,
+      y: 64,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 48, y: 48, width: 32, height: 32 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 4,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 100, y: 80, width: 400, height: 300 }),
+        getTargetBoundsAsync: async () => ({ x: 100, y: 80, width: 400, height: 300 }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 100,
+        y: 80,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: patch.toString('base64'),
+        metadata: { img_dhash: recordedHash },
+      },
+      { x: 100, y: 80 }
+    );
+
+    const status = engine.getStatus();
+    expect(result).toEqual({ x: 164, y: 144 });
+    expect(status.smartClickLastSource).toBe('window');
+    expect(status.smartClickLastConfidence).toBeCloseTo(0.91);
+    expect(status.smartClickLastDHashDistance).toBe(0);
+    expect(status.smartClickAnchorDx).toBe(64);
+    expect(status.smartClickAnchorDy).toBe(64);
+    captureSpy.mockRestore();
   });
 });
