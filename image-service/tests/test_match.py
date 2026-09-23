@@ -302,3 +302,39 @@ def test_ocr_endpoint_rejects_images_over_pixel_budget():
     assert res.status_code == 400
     data = res.get_json()
     assert data["success"] is False
+
+
+def test_ocr_uses_one_pass_inside_the_requested_budget(monkeypatch):
+    calls = []
+
+    def fake_data(_image, output_type=None, timeout=None):
+        calls.append(("data", timeout))
+        return {
+            "text": ["Submit"],
+            "conf": ["91"],
+            "left": [40],
+            "top": [30],
+            "width": [80],
+            "height": [20],
+            "block_num": [1],
+            "par_num": [1],
+            "line_num": [1],
+        }
+
+    def fake_string(*_args, **_kwargs):
+        calls.append("string")
+        raise AssertionError("second ocr pass")
+
+    monkeypatch.setattr("app.main.pytesseract.image_to_data", fake_data)
+    monkeypatch.setattr("app.main.pytesseract.image_to_string", fake_string)
+    app = create_app()
+    client = app.test_client()
+    image = np.zeros((40, 40, 3), dtype=np.uint8)
+    res = client.post("/ocr", json={"image": to_base64(image), "timeoutMs": 80})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["items"][0]["text"] == "Submit"
+    assert data["items"][0]["bounds"] == {"x": 40, "y": 30, "width": 80, "height": 20}
+    assert "Submit" in data["text"]
+    assert calls == [("data", 0.08)]

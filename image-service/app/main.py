@@ -459,8 +459,11 @@ def ocr():
             return jsonify({"error": "Missing image"}), 400
 
         image = base64_to_cv2(data["image"], max_pixels=MAX_OCR_PIXELS)
-        text = pytesseract.image_to_string(image, timeout=TESSERACT_TIMEOUT_SECONDS)
-        data_dict = pytesseract.image_to_data(image, output_type=Output.DICT, timeout=TESSERACT_TIMEOUT_SECONDS)
+        data_dict = pytesseract.image_to_data(
+            image,
+            output_type=Output.DICT,
+            timeout=requested_ocr_timeout_seconds(data),
+        )
 
         line_map = {}
         for idx, raw_text in enumerate(data_dict.get("text", [])):
@@ -521,10 +524,11 @@ def ocr():
                 break
 
         processing_ms = int((time.time() - start_time) * 1000)
+        text = "\n".join(item["text"] for item in items)[:MAX_OCR_TEXT_CHARS]
         return jsonify(
             {
                 "success": True,
-                "text": text.strip()[:MAX_OCR_TEXT_CHARS],
+                "text": text,
                 "items": items,
                 "processingTimeMs": processing_ms,
             }
@@ -559,6 +563,19 @@ def ocr():
                 "error": str(exc),
             }
         )
+
+
+def requested_ocr_timeout_seconds(payload):
+    raw = payload.get("timeoutMs") if isinstance(payload, dict) else None
+    if raw is None:
+        return TESSERACT_TIMEOUT_SECONDS
+    try:
+        milliseconds = float(raw)
+    except (TypeError, ValueError):
+        return TESSERACT_TIMEOUT_SECONDS
+    if not math.isfinite(milliseconds):
+        return TESSERACT_TIMEOUT_SECONDS
+    return max(0.01, min(float(TESSERACT_TIMEOUT_SECONDS), milliseconds / 1000.0))
 
 
 def create_app():
