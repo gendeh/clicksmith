@@ -805,6 +805,99 @@ liveMatch('a moved screen target clicks the context image when the patch is pain
   }
 }, 20000);
 
+liveMatch('a flat screen patch at 140% clicks the scaled center', async () => {
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const origin = { x: 400, y: 300 };
+  const size = 640;
+  const patchSize = 96;
+  const scale = 1.4;
+  const patchOrigin = { x: 220, y: 180 };
+  const scaledW = Math.round(patchSize * scale);
+  const scaledH = Math.round(patchSize * scale);
+  const raw = Buffer.alloc(size * size * 3, 24);
+  for (let y = patchOrigin.y; y < patchOrigin.y + scaledH; y += 1) {
+    for (let x = patchOrigin.x; x < patchOrigin.x + scaledW; x += 1) {
+      const i = (y * size + x) * 3;
+      raw[i] = 140;
+      raw[i + 1] = 140;
+      raw[i + 2] = 140;
+    }
+  }
+  const search = await sharp(raw, { raw: { width: size, height: size, channels: 3 } }).png().toBuffer();
+  const patchRaw = Buffer.alloc(patchSize * patchSize * 3, 140);
+  const patch = await sharp(patchRaw, { raw: { width: patchSize, height: patchSize, channels: 3 } }).png().toBuffer();
+  const recordedHash = await computeDHash(patch);
+  const recorded = { x: origin.x + size / 2, y: origin.y + size / 2 };
+  const visual = {
+    x: origin.x + patchOrigin.x + scaledW / 2,
+    y: origin.y + patchOrigin.y + scaledH / 2,
+  };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-flat-140',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  expect(screenSpy).not.toHaveBeenCalled();
+  if (
+    Math.abs(result.x - visual.x) > 8 ||
+    Math.abs(result.y - visual.y) > 8
+  ) {
+    throw new Error(
+      `click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) scale ${status.smartClickLastScale} ${status.smartClickLastConfidence} source ${status.smartClickLastSource}`
+    );
+  }
+  expect(result).not.toEqual(recorded);
+  expect(status.smartClickLastSource).toBe('region');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(status.smartClickLastScale).toBeGreaterThanOrEqual(scale - 0.08);
+  expect(status.smartClickLastScale).toBeLessThanOrEqual(scale + 0.08);
+  if (elapsed >= 460) {
+    throw new Error(`flat 140 click took ${elapsed}ms at (${result.x}, ${result.y})`);
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

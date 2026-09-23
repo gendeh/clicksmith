@@ -77,14 +77,14 @@ def assert_click_on_embedded_patch(match, template, scale, tolerance=8):
     assert abs(float(match["y"]) - center_y) <= tolerance
 
 
-def post_match(client, template, search, threshold=0.55, min_scale=0.7, max_scale=1.4, scale_hint=1.0, method="template"):
+def post_match(client, template, search, threshold=0.55, min_scale=0.7, max_scale=1.4, scale_hint=1.0, method="template", find_all=False, max_matches=1):
     payload = {
         "template": to_base64(template),
         "searchArea": to_base64(search),
         "threshold": threshold,
         "method": method,
-        "findAll": False,
-        "maxMatches": 1,
+        "findAll": find_all,
+        "maxMatches": max_matches,
         "minScale": min_scale,
         "maxScale": max_scale,
         "scaleHint": scale_hint,
@@ -511,3 +511,61 @@ def test_flat_template_clicks_the_matching_patch_not_the_brighter_decoy():
     assert data["bestMatch"]["confidence"] > 0.6
     assert abs(float(data["bestMatch"]["x"]) - 160) <= 2
     assert abs(float(data["bestMatch"]["y"]) - 110) <= 2
+
+
+def test_flat_patch_at_140_percent_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = np.full((80, 80, 3), (140, 140, 140), dtype=np.uint8)
+    origin = (80, 90)
+    scale = 1.4
+    search = embed_scaled_template(template, scale, canvas_size=320, origin=origin)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="template",
+        find_all=True,
+        max_matches=4,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+    assert data["matches"]
+    assert abs(float(data["matches"][0]["scale"]) - scale) <= 0.08
+
+
+def test_flat_patch_at_70_percent_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = np.full((80, 80, 3), (140, 140, 140), dtype=np.uint8)
+    origin = (80, 90)
+    scale = 0.7
+    search = embed_scaled_template(template, scale, canvas_size=320, origin=origin)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="template",
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8

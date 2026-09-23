@@ -168,6 +168,7 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
 
 
 DECISIVE_TEMPLATE_CONFIDENCE = 0.92
+FLAT_SCALE_SCORE_TIE = 0.02
 
 
 def match_template_multiscale(
@@ -202,13 +203,22 @@ def match_template_multiscale(
         return True
 
     scales = build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08)
+    template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
+    low_variance = float(np.std(template_gray)) < 6.0
     best_scale = None
     stopped_on_decisive = False
 
-    for scale in scales:
-        if not scale_fits():
-            break
+    def prefer_candidate(candidate, incumbent):
+        if incumbent is None:
+            return True
+        candidate_score = score_of(candidate)
+        incumbent_score = score_of(incumbent)
+        if low_variance and abs(candidate_score - incumbent_score) <= FLAT_SCALE_SCORE_TIE:
+            return float(candidate.get("scale") or 0.0) > float(incumbent.get("scale") or 0.0)
+        return candidate_score > incumbent_score
 
+    def match_at_scale(scale):
+        nonlocal scale_cost_s
         if abs(scale - 1.0) < 1e-6:
             scaled_template = template
         else:
@@ -219,25 +229,44 @@ def match_template_multiscale(
                 fy=scale,
                 interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
             )
-
-        h, w = scaled_template.shape[:2]
-        if h < 4 or w < 4 or h > search_area.shape[0] or w > search_area.shape[1]:
-            continue
-
+        height, width = scaled_template.shape[:2]
+        if height < 4 or width < 4 or height > search_area.shape[0] or width > search_area.shape[1]:
+            return None, []
         scale_started = time.perf_counter()
         candidate_best, candidate_matches = match_template(
             scaled_template, search_area, threshold, find_all, max_matches, template_scale=scale
         )
         scale_cost_s = max(scale_cost_s, time.perf_counter() - scale_started)
-        if candidate_best:
-            if not best_match or score_of(candidate_best) > score_of(best_match):
+        return candidate_best, candidate_matches
+
+    if low_variance:
+        ordered = sorted(set(scales))
+        low = 0
+        high = len(ordered) - 1
+        while low <= high and scale_fits():
+            mid = (low + high) // 2
+            candidate_best, candidate_matches = match_at_scale(ordered[mid])
+            if candidate_best:
+                best_match = candidate_best
+                best_scale = ordered[mid]
+                collected = list(candidate_matches or [candidate_best])
+                low = mid + 1
+            else:
+                high = mid - 1
+        stopped_on_decisive = best_match is not None
+    else:
+        for scale in scales:
+            if not scale_fits():
+                break
+            candidate_best, candidate_matches = match_at_scale(scale)
+            if candidate_best and prefer_candidate(candidate_best, best_match):
                 best_match = candidate_best
                 best_scale = scale
-        if candidate_matches:
-            collected.extend(candidate_matches)
-        if best_match and score_of(best_match) >= DECISIVE_TEMPLATE_CONFIDENCE:
-            stopped_on_decisive = True
-            break
+            if candidate_matches:
+                collected.extend(candidate_matches)
+            if best_match and score_of(best_match) >= DECISIVE_TEMPLATE_CONFIDENCE:
+                stopped_on_decisive = True
+                break
 
     if not stopped_on_decisive and best_scale is not None and scale_fits():
         for delta in (-0.04, -0.02, 0.02, 0.04):
@@ -261,10 +290,19 @@ def match_template_multiscale(
                 scaled_template, search_area, threshold, find_all, max_matches, template_scale=scale
             )
             scale_cost_s = max(scale_cost_s, time.perf_counter() - scale_started)
-            if candidate_best and (not best_match or score_of(candidate_best) > score_of(best_match)):
+            if candidate_best and prefer_candidate(candidate_best, best_match):
                 best_match = candidate_best
+                best_scale = scale
             if candidate_matches:
                 collected.extend(candidate_matches)
+
+    if low_variance and best_match is not None:
+        winning_scale = float(best_match.get("scale") or 0.0)
+        collected = [
+            item
+            for item in collected
+            if abs(float(item.get("scale") or 0.0) - winning_scale) <= 0.021
+        ]
 
     if collected:
         collected = sorted(collected, key=score_of, reverse=True)
