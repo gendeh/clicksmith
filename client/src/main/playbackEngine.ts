@@ -1543,6 +1543,52 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
+            if (!timedOut() && preferredBounds) {
+                const ocrRegion = {
+                    x: Math.max(desktopBounds.x, preferredBounds.x),
+                    y: Math.max(desktopBounds.y, preferredBounds.y),
+                    width: Math.max(
+                        1,
+                        Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
+                            Math.max(desktopBounds.x, preferredBounds.x)
+                    ),
+                    height: Math.max(
+                        1,
+                        Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
+                            Math.max(desktopBounds.y, preferredBounds.y)
+                    ),
+                };
+                const pickedOcr = await this.tryOcrSmartClickFallback(
+                    event,
+                    ocrRegion,
+                    expected,
+                    adaptationMode ? 0.52 : fullscreenThreshold,
+                    Math.max(120, Math.min(900, remainingBudgetMs()))
+                );
+                if (pickedOcr) {
+                    if (!telemetry.open) return pickedOcr.coords;
+                    this.recordSmartClickStableScale(this.smartClickScaleHint ?? undefined);
+                    this.smartClickConsecutiveFailures = 0;
+                    if (this.smartClickAdaptationClicksLeft > 0) {
+                        this.smartClickAdaptationClicksLeft = Math.max(0, this.smartClickAdaptationClicksLeft - 1);
+                    }
+                    this.status = {
+                        ...this.status,
+                        successfulMatches: this.status.successfulMatches + 1,
+                        lastError: this.status.lastError === 'image_service_unavailable' ? undefined : this.status.lastError,
+                        smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
+                    };
+                    this.markSmartClickSource(
+                        'window',
+                        pickedOcr.method,
+                        pickedOcr.confidence,
+                        pickedOcr.dhashDistance,
+                        pickedOcr.scale
+                    );
+                    return pickedOcr.coords;
+                }
+            }
+
             if (!timedOut()) {
                 const anchoredExpected = this.applySmartClickAnchor(expected);
                 const rawRegion = {
@@ -1867,51 +1913,6 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (!timedOut() && preferredBounds) {
-                const ocrRegion = {
-                    x: Math.max(desktopBounds.x, preferredBounds.x),
-                    y: Math.max(desktopBounds.y, preferredBounds.y),
-                    width: Math.max(
-                        1,
-                        Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
-                            Math.max(desktopBounds.x, preferredBounds.x)
-                    ),
-                    height: Math.max(
-                        1,
-                        Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
-                            Math.max(desktopBounds.y, preferredBounds.y)
-                    ),
-                };
-                const pickedOcr = await this.tryOcrSmartClickFallback(
-                    event,
-                    ocrRegion,
-                    expected,
-                    adaptationMode ? 0.52 : fullscreenThreshold,
-                    Math.max(120, Math.min(900, remainingBudgetMs()))
-                );
-                if (pickedOcr) {
-                    if (!telemetry.open) return pickedOcr.coords;
-                    this.recordSmartClickStableScale(this.smartClickScaleHint ?? undefined);
-                    this.smartClickConsecutiveFailures = 0;
-                    if (this.smartClickAdaptationClicksLeft > 0) {
-                        this.smartClickAdaptationClicksLeft = Math.max(0, this.smartClickAdaptationClicksLeft - 1);
-                    }
-                    this.status = {
-                        ...this.status,
-                        successfulMatches: this.status.successfulMatches + 1,
-                        lastError: this.status.lastError === 'image_service_unavailable' ? undefined : this.status.lastError,
-                        smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
-                    };
-                    this.markSmartClickSource(
-                        'window',
-                        pickedOcr.method,
-                        pickedOcr.confidence,
-                        pickedOcr.dhashDistance,
-                        pickedOcr.scale
-                    );
-                    return pickedOcr.coords;
-                }
-            }
         } catch (error: any) {
             if (!telemetry.open) {
                 return fallbackCoords;

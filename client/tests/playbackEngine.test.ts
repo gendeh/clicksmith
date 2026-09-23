@@ -1303,4 +1303,77 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('recorded text moves the click before the image budget is gone', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    let now = 0;
+    const matchImage = jest.fn(async () => {
+      now += 90;
+      return { success: true, matches: [], bestMatch: null, processingTimeMs: 90 };
+    });
+    const ocrImage = jest.fn().mockResolvedValue({
+      success: true,
+      processingTimeMs: 12,
+      items: [
+        {
+          text: 'Submit',
+          confidence: 91,
+          bounds: { x: 40, y: 30, width: 80, height: 20 },
+        },
+      ],
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: { matchImage, ocrImage } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+      } as any,
+      clock: {
+        now: () => now,
+        setTimeout: (handler, timeout) => setTimeout(handler, timeout),
+        clearTimeout: (handle) => clearTimeout(handle),
+      },
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const expected = { x: 40, y: 30 };
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: expected.x,
+        y: expected.y,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+        metadata: {
+          ocr_primary_text_normalized: 'submit',
+          ocr_anchor_norm_x: 0.25,
+          ocr_anchor_norm_y: -0.5,
+        },
+      },
+      expected
+    );
+
+    expect(result).toEqual({ x: 600, y: 230 });
+    expect(matchImage).toHaveBeenCalledTimes(1);
+    expect(ocrImage).toHaveBeenCalledTimes(1);
+    expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
+    expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
 });
