@@ -179,21 +179,33 @@ def match_template_multiscale(
     max_scale,
     scale_hint,
     max_budget_ms,
+    deadline=None,
 ):
     start = time.perf_counter()
+    if deadline is None:
+        deadline = start + max(0.0, float(max_budget_ms)) / 1000.0
     best_match = None
     collected = []
     max_matches = max(1, min(MAX_MATCHES, int(max_matches)))
+    scale_cost_s = 0.0
 
     def score_of(item):
         return float(item.get("score", item.get("confidence", 0.0)))
+
+    def scale_fits():
+        now = time.perf_counter()
+        if now >= deadline:
+            return False
+        if scale_cost_s > 0 and now + scale_cost_s >= deadline:
+            return False
+        return True
 
     scales = build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08)
     best_scale = None
     stopped_on_decisive = False
 
     for scale in scales:
-        if (time.perf_counter() - start) * 1000 >= max_budget_ms:
+        if not scale_fits():
             break
 
         if abs(scale - 1.0) < 1e-6:
@@ -211,9 +223,11 @@ def match_template_multiscale(
         if h < 4 or w < 4 or h > search_area.shape[0] or w > search_area.shape[1]:
             continue
 
+        scale_started = time.perf_counter()
         candidate_best, candidate_matches = match_template(
             scaled_template, search_area, threshold, find_all, max_matches, template_scale=scale
         )
+        scale_cost_s = max(scale_cost_s, time.perf_counter() - scale_started)
         if candidate_best:
             if not best_match or score_of(candidate_best) > score_of(best_match):
                 best_match = candidate_best
@@ -224,16 +238,12 @@ def match_template_multiscale(
             stopped_on_decisive = True
             break
 
-    if (
-        not stopped_on_decisive
-        and best_scale is not None
-        and (time.perf_counter() - start) * 1000 < max_budget_ms
-    ):
+    if not stopped_on_decisive and best_scale is not None and scale_fits():
         for delta in (-0.04, -0.02, 0.02, 0.04):
             scale = round(best_scale + delta, 3)
             if scale < min_scale or scale > max_scale:
                 continue
-            if (time.perf_counter() - start) * 1000 >= max_budget_ms:
+            if not scale_fits():
                 break
             scaled_template = cv2.resize(
                 template,
@@ -245,9 +255,11 @@ def match_template_multiscale(
             h, w = scaled_template.shape[:2]
             if h < 4 or w < 4 or h > search_area.shape[0] or w > search_area.shape[1]:
                 continue
+            scale_started = time.perf_counter()
             candidate_best, candidate_matches = match_template(
                 scaled_template, search_area, threshold, find_all, max_matches, template_scale=scale
             )
+            scale_cost_s = max(scale_cost_s, time.perf_counter() - scale_started)
             if candidate_best and (not best_match or score_of(candidate_best) > score_of(best_match)):
                 best_match = candidate_best
             if candidate_matches:
@@ -376,7 +388,7 @@ def health():
 
 @app.route("/match", methods=["POST"])
 def match_image():
-    start_time = time.time()
+    start_time = time.perf_counter()
     try:
         data = request.json or {}
         template_b64 = data.get("template")
@@ -389,6 +401,7 @@ def match_image():
         max_scale = _clamp_float(data.get("maxScale"), min_scale, 3.0, DEFAULT_MAX_SCALE)
         scale_hint = _clamp_float(data.get("scaleHint"), min_scale, max_scale, DEFAULT_SCALE_HINT)
         max_budget_ms = int(_clamp_float(data.get("maxBudgetMs"), 20, 500, DEFAULT_MAX_BUDGET_MS))
+        deadline = start_time + max_budget_ms / 1000.0
 
         if not template_b64 or not search_area_b64:
             return jsonify({"error": "Missing template or search area image"}), 400
@@ -412,11 +425,13 @@ def match_image():
                 max_scale,
                 scale_hint,
                 max_budget_ms,
+                deadline,
             )
 
         if method in ["feature", "hybrid"]:
-            budget_left = max_budget_ms - (time.time() - start_time) * 1000
-            should_try_feature = budget_left > 0 and (
+            budget_left = (deadline - time.perf_counter()) * 1000
+            feature_floor = 0 if method == "feature" else 50
+            should_try_feature = budget_left > feature_floor and (
                 method == "feature"
                 or not best_match
                 or best_match["confidence"] < max(0.82, threshold + 0.12)
@@ -444,7 +459,7 @@ def match_image():
             if find_all:
                 matches = matches[:max_matches]
 
-        processing_ms = int((time.time() - start_time) * 1000)
+        processing_ms = int((time.perf_counter() - start_time) * 1000)
 
         return jsonify(
             {

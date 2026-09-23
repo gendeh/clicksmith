@@ -438,3 +438,31 @@ def test_hybrid_does_not_start_features_after_the_budget_is_spent(monkeypatch):
     assert data["bestMatch"]["method"] == "template"
     assert data["bestMatch"]["x"] == 90
     assert data["bestMatch"]["y"] == 70
+
+
+def test_large_template_miss_returns_inside_the_requested_budget():
+    app = create_app()
+    client = app.test_client()
+    rng = np.random.default_rng(0)
+    search = rng.integers(0, 255, (600, 800, 3), dtype=np.uint8)
+    template = rng.integers(0, 255, (96, 96, 3), dtype=np.uint8)
+    res = client.post(
+        "/match",
+        json={
+            "template": to_base64(template),
+            "searchArea": to_base64(search),
+            "threshold": 0.25,
+            "method": "hybrid",
+            "findAll": True,
+            "maxMatches": 8,
+            "minScale": 0.7,
+            "maxScale": 1.4,
+            "scaleHint": 1.0,
+            "maxBudgetMs": 180,
+        },
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is False
+    assert data["bestMatch"] is None
+    assert data["processingTimeMs"] <= 180
