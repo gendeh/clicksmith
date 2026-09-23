@@ -685,6 +685,14 @@ def ocr():
             return jsonify({"error": "Missing image"}), 400
 
         image = base64_to_cv2(data["image"], max_pixels=MAX_OCR_PIXELS)
+        source_height, source_width = image.shape[:2]
+        ocr_scale = 2 if 96 <= max(source_height, source_width) <= 448 else 1
+        if ocr_scale != 1:
+            image = cv2.resize(
+                image,
+                (source_width * ocr_scale, source_height * ocr_scale),
+                interpolation=cv2.INTER_CUBIC,
+            )
         data_dict = pytesseract.image_to_data(
             image,
             output_type=Output.DICT,
@@ -703,10 +711,10 @@ def ocr():
                 continue
             if confidence < 0:
                 continue
-            left = int(data_dict.get("left", [0])[idx])
-            top = int(data_dict.get("top", [0])[idx])
-            width = int(data_dict.get("width", [0])[idx])
-            height = int(data_dict.get("height", [0])[idx])
+            left = int(round(int(data_dict.get("left", [0])[idx]) / ocr_scale))
+            top = int(round(int(data_dict.get("top", [0])[idx]) / ocr_scale))
+            width = int(round(int(data_dict.get("width", [0])[idx]) / ocr_scale))
+            height = int(round(int(data_dict.get("height", [0])[idx]) / ocr_scale))
             words.append(
                 {
                     "text": item_text,

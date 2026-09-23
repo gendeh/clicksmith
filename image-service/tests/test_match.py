@@ -730,6 +730,68 @@ def test_ocr_returns_the_distinctive_word_on_a_merged_line():
     assert lines[0]["bounds"]["width"] > 400
 
 
+def _button(label, fill):
+    width, height = 220, 48
+    image = np.full((height, width, 3), fill, dtype=np.uint8)
+    cv2.rectangle(image, (1, 1), (width - 2, height - 2), (17, 24, 39), 2)
+    cv2.putText(image, label, (8, 32), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
+    return image
+
+
+def _context_crop(page, center):
+    crop = np.full((384, 384, 3), 245, dtype=np.uint8)
+    cx, cy = center
+    half = 192
+    x0, y0 = max(0, cx - half), max(0, cy - half)
+    x1, y1 = min(page.shape[1], cx + half), min(page.shape[0], cy + half)
+    dx, dy = x0 - (cx - half), y0 - (cy - half)
+    crop[dy : dy + (y1 - y0), dx : dx + (x1 - x0)] = page[y0:y1, x0:x1]
+    return crop
+
+
+def test_small_context_crop_reads_mint_and_ocean():
+    app = create_app()
+    client = app.test_client()
+    fills = {
+        "A": ((199, 243, 254), "Target A: Sunflower"),
+        "B": ((229, 250, 209), "Target B: Mint"),
+        "C": ((254, 234, 219), "Target C: Ocean"),
+        "D": ((226, 226, 254), "Target D: Coral"),
+    }
+    spots = {"A": (40, 110), "B": (280, 110), "C": (520, 110), "D": (40, 280)}
+    page = np.full((600, 800, 3), 245, dtype=np.uint8)
+    for key, (x, y) in spots.items():
+        img = _button(fills[key][1], fills[key][0])
+        h, w = img.shape[:2]
+        page[y : y + h, x : x + w] = img
+    for key, word in (("B", "Mint"), ("C", "Ocean")):
+        x, y = spots[key]
+        img = _button(fills[key][1], fills[key][0])
+        h, w = img.shape[:2]
+        center = (int(round(x + w / 2.0)), int(round(y + h / 2.0)))
+        res = client.post(
+            "/ocr",
+            json={"image": to_base64(_context_crop(page, center)), "timeoutMs": 800},
+        )
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["success"] is True
+        words = [item["text"].strip() for item in data["items"] if " " not in item["text"].strip()]
+        assert word in words
+        click = 192
+        lines = []
+        for item in data["items"]:
+            if " " not in item["text"]:
+                continue
+            bounds = item["bounds"]
+            if (
+                bounds["x"] <= click <= bounds["x"] + bounds["width"]
+                and bounds["y"] <= click <= bounds["y"] + bounds["height"]
+            ):
+                lines.append(item["text"])
+        assert any(word in line for line in lines)
+
+
 def test_match_endpoint_caps_find_all_work():
     app = create_app()
     client = app.test_client()
