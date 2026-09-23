@@ -455,6 +455,48 @@ def test_patch_on_a_desktop_sized_image_clicks_the_far_center():
     assert int(data["processingTimeMs"]) <= 180
 
 
+def test_scaled_patch_on_a_desktop_sized_image_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(96)
+    for scale, origin in ((0.7, (900, 400)), (1.25, (1100, 500)), (1.4, (1100, 500))):
+        scaled = cv2.resize(
+            template,
+            dsize=None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
+        )
+        search = np.zeros((1080, 1920, 3), dtype=np.uint8)
+        height, width = scaled.shape[:2]
+        search[origin[1] : origin[1] + height, origin[0] : origin[0] + width] = scaled
+        res = client.post(
+            "/match",
+            json={
+                "template": to_base64(template),
+                "searchArea": to_base64(search),
+                "threshold": 0.25,
+                "method": "hybrid",
+                "findAll": True,
+                "maxMatches": 6,
+                "minScale": 0.7,
+                "maxScale": 1.4,
+                "scaleHint": 1.0,
+                "maxBudgetMs": 160,
+            },
+        )
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["success"] is True
+        match = data["bestMatch"]
+        center_x, center_y = expected_center(template, scale, origin)
+        assert float(match["confidence"]) > 0.6
+        assert abs(float(match["scale"]) - scale) <= 0.08
+        assert abs(float(match["x"]) - center_x) <= 8
+        assert abs(float(match["y"]) - center_y) <= 8
+        assert int(data["processingTimeMs"]) <= 160
+
+
 def test_ocr_endpoint_returns_line_items():
     app = create_app()
     client = app.test_client()

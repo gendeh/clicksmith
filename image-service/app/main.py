@@ -112,16 +112,27 @@ def _match_template_direct(template, search_area, threshold, find_all, max_match
 TEMPLATE_PYRAMID_MIN_PIXELS = 640 * 640
 
 
-def match_template(template, search_area, threshold, find_all, max_matches, template_scale=1.0):
+def _template_pyramid_factor(template, search_area):
     height, width = search_area.shape[:2]
     template_h, template_w = template.shape[:2]
     if height * width <= TEMPLATE_PYRAMID_MIN_PIXELS or template_h < 16 or template_w < 16:
+        return 1
+    if min(template_h, template_w) >= 32 and min(height, width) >= 64:
+        return 4
+    return 2
+
+
+def match_template(template, search_area, threshold, find_all, max_matches, template_scale=1.0):
+    height, width = search_area.shape[:2]
+    template_h, template_w = template.shape[:2]
+    factor = _template_pyramid_factor(template, search_area)
+    if factor == 1:
         return _match_template_direct(
             template, search_area, threshold, find_all, max_matches, template_scale
         )
     small_template = cv2.resize(
         template,
-        (template_w // 2, template_h // 2),
+        (template_w // factor, template_h // factor),
         interpolation=cv2.INTER_AREA,
     )
     small_h, small_w = small_template.shape[:2]
@@ -131,7 +142,7 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
         )
     small_search = cv2.resize(
         search_area,
-        (width // 2, height // 2),
+        (width // factor, height // factor),
         interpolation=cv2.INTER_AREA,
     )
     _coarse, coarse_matches = _match_template_direct(
@@ -140,10 +151,10 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
     if not coarse_matches:
         return None, []
     refined = []
-    margin = 16
+    margin = max(16, factor * 4)
     for coarse in coarse_matches:
-        center_x = int(coarse["x"]) * 2
-        center_y = int(coarse["y"]) * 2
+        center_x = int(coarse["x"]) * factor
+        center_y = int(coarse["y"]) * factor
         x0 = max(0, center_x - template_w // 2 - margin)
         y0 = max(0, center_y - template_h // 2 - margin)
         x1 = min(width, center_x + template_w - template_w // 2 + margin)
