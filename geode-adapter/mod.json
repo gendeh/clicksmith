@@ -1,14 +1,14 @@
 {
-  "geode": "4.10.2",
+  "geode": "5.0.1",
   "id": "clicksmith.geode-adapter",
   "name": "Clicksmith Geode Adapter",
-  "version": "0.2.5",
+  "version": "0.2.7",
   "developer": "Clicksmith",
-  "description": "Exposes local record/replay endpoints for Clicksmith.",
+  "description": "Tick-domain record/replay. Progress tick is the clock.",
   "gd": {
-    "win": "2.2074",
-    "mac": "2.2074",
-    "android": "2.2074"
+    "win": "2.2081",
+    "mac": "2.2081",
+    "android": "2.2081"
   },
   "resources": {}
 }

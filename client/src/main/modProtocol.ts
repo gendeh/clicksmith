@@ -12,6 +12,11 @@ export interface ModStatusResponse {
     takeover_armed?: boolean;
     paused?: boolean;
     game_tick?: number;
+    protocol_version?: string;
+    build_id?: string;
+    last_freeze_tick?: number;
+    last_freeze_run_id?: number;
+    last_freeze_replay_index?: number;
     error?: string;
     [key: string]: unknown;
 }
