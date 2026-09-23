@@ -917,4 +917,72 @@ describe('PlaybackEngine', () => {
     await engine.stop();
     jest.useRealTimers();
   });
+
+  test('a context feature match clicks only when confidence clears 0.6', async () => {
+    const regionSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const expected = { x: 40, y: 30 };
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: expected.x,
+      y: expected.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: Buffer.from('template').toString('base64'),
+      img_context_b64: Buffer.from('context').toString('base64'),
+    };
+    const run = async (confidence: number) => {
+      const feature = {
+        x: 40,
+        y: 30,
+        confidence,
+        method: 'feature' as const,
+        scale: 1,
+        homography_ok: true,
+        inliers: 12,
+        bounds: { x: 20, y: 10, width: 40, height: 40 },
+      };
+      const matchImage = jest.fn(async (request: { method?: string; threshold?: number }) => {
+        if (request.method === 'feature') {
+          return { success: true, matches: [feature], bestMatch: feature, processingTimeMs: 8 };
+        }
+        return { success: true, matches: [], bestMatch: null, processingTimeMs: 3 };
+      });
+      const engine = new PlaybackEngine({
+        inputPlayer: {} as any,
+        imageService: { matchImage } as any,
+        windowManager: {
+          getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+          getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        } as any,
+      }) as any;
+      engine.config = {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: true,
+        useRelativeCoords: false,
+        imageMatchThreshold: 0.6,
+      };
+      engine.status = engine.createStatus('playing');
+      const result = await engine.resolveSmartClick(event, expected);
+      const featureRequest = matchImage.mock.calls.map(call => call[0]).find(request => request.method === 'feature');
+      return { result, engine, featureRequest };
+    };
+
+    const accepted = await run(0.66);
+    expect(accepted.featureRequest?.threshold).toBeGreaterThanOrEqual(0.6);
+    expect(accepted.result).toEqual({ x: 540, y: 230 });
+    expect(accepted.engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.66);
+
+    const rejected = await run(0.55);
+    expect(rejected.result).toEqual(expected);
+    expect(rejected.engine.getStatus().successfulMatches).toBe(0);
+
+    regionSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
 });
