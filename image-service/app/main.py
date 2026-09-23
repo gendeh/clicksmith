@@ -137,7 +137,7 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
     common_steps = [0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.33, 1.5, 1.67, 1.75, 2.0]
     in_range_common = [round(v, 3) for v in common_steps if min_scale <= v <= max_scale]
 
-    preferred = [round(scale_hint, 3)]
+    preferred = [round(scale_hint, 3), round(min_scale, 3), round(max_scale, 3)]
     # When hint is near 1.0, aggressively probe browser zoom pivots early.
     if abs(scale_hint - 1.0) <= 0.08:
         preferred.extend([0.8, 1.25, 0.75, 1.33, 0.67, 1.5, 1.67, 2.0])
@@ -346,6 +346,18 @@ def match_feature(template, search_area):
     }
 
 
+def scale_within_request(scale, min_scale, max_scale, slack=0.25):
+    if scale is None:
+        return True
+    try:
+        value = float(scale)
+    except (TypeError, ValueError):
+        return False
+    if not np.isfinite(value):
+        return False
+    return (min_scale - slack) <= value <= (max_scale + slack)
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "service": "image-service"})
@@ -399,6 +411,10 @@ def match_image():
             )
             if should_try_feature:
                 feature_match = match_feature(template, search_area)
+                if feature_match and not scale_within_request(
+                    feature_match.get("scale"), min_scale, max_scale
+                ):
+                    feature_match = None
                 if feature_match:
                     if not matches:
                         matches = [feature_match]

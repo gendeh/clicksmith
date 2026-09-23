@@ -619,6 +619,21 @@ export class PlaybackEngine extends EventEmitter {
         this.smartClickScaleHint = recordedScale;
     }
 
+    private isSmartClickScaleInWindow(scale: number | undefined, adaptationMode: boolean): boolean {
+        if (scale === undefined || !Number.isFinite(scale)) return true;
+        const scaleWindow = this.getSmartClickScaleWindow(adaptationMode);
+        const slack = 0.05;
+        return scale >= scaleWindow.minScale - slack && scale <= scaleWindow.maxScale + slack;
+    }
+
+    private isReportableSmartClickScale(scale: number): boolean {
+        const slack = 0.05;
+        return (
+            scale >= PlaybackEngine.SMART_CLICK_ADAPTIVE_MIN_SCALE - slack &&
+            scale <= PlaybackEngine.SMART_CLICK_ADAPTIVE_MAX_SCALE + slack
+        );
+    }
+
     private getSmartClickScaleWindow(adaptationMode: boolean): { minScale: number; maxScale: number } {
         if (adaptationMode) {
             return {
@@ -748,6 +763,7 @@ export class PlaybackEngine extends EventEmitter {
         const topScaled: MatchResult[] = [];
         for (const candidate of candidates) {
             if (!Number.isFinite(candidate.scale) || candidate.confidence < confidenceFloor) continue;
+            if (!this.isReportableSmartClickScale(Number(candidate.scale))) continue;
             let insertAt = topScaled.length;
             while (insertAt > 0 && topScaled[insertAt - 1].confidence < candidate.confidence) {
                 insertAt -= 1;
@@ -1208,6 +1224,9 @@ export class PlaybackEngine extends EventEmitter {
             };
             const method = (candidate.method ?? 'template').toLowerCase();
             const scale = Number.isFinite(candidate.scale) ? Number(candidate.scale) : undefined;
+            if (!this.isSmartClickScaleInWindow(scale, adaptationMode)) {
+                continue;
+            }
             const currentScaleHint = this.getSmartClickScaleReference();
             const scaleRank = scale === undefined ? 0 : Math.abs(scale - currentScaleHint);
             const jumpFromExpected = Math.hypot(coords.x - expected.x, coords.y - expected.y);

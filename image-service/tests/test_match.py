@@ -137,6 +137,38 @@ def test_match_endpoint_zoom_edges_0_7_and_1_4():
         assert_click_on_embedded_patch(data["bestMatch"], template, scale)
 
 
+def test_zoom_edges_match_inside_window_stage_budget():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(128)
+    for scale in (0.7, 1.4):
+        search = embed_scaled_template(template, scale, canvas_size=480, origin=(40, 36))
+        res = client.post(
+            "/match",
+            json={
+                "template": to_base64(template),
+                "searchArea": to_base64(search),
+                "threshold": 0.6,
+                "method": "hybrid",
+                "findAll": True,
+                "maxMatches": 8,
+                "minScale": 0.7,
+                "maxScale": 1.4,
+                "scaleHint": 1.0,
+                "maxBudgetMs": 90,
+            },
+        )
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["bestMatch"] is not None
+        assert data["bestMatch"]["confidence"] >= 0.6
+        assert abs(float(data["bestMatch"]["scale"]) - scale) <= 0.15
+        center_x = 40 + (template.shape[1] * scale) / 2.0
+        center_y = 36 + (template.shape[0] * scale) / 2.0
+        assert abs(float(data["bestMatch"]["x"]) - center_x) <= 8
+        assert abs(float(data["bestMatch"]["y"]) - center_y) <= 8
+
+
 def test_match_endpoint_in_range_scale_1_3():
     app = create_app()
     client = app.test_client()
@@ -222,6 +254,34 @@ def test_match_endpoint_caps_find_all_work():
     assert res.status_code == 200
     data = res.get_json()
     assert len(data["matches"]) <= MAX_MATCHES
+
+
+def test_feature_outside_scale_window_does_not_replace_template(monkeypatch):
+    def outside_feature(_template, _search):
+        return {
+            "x": 18,
+            "y": 238,
+            "confidence": 0.9,
+            "method": "feature",
+            "score": 0.9,
+            "scale": 4.34,
+            "homography_ok": True,
+            "inliers": 20,
+            "bounds": {"x": 0, "y": 200, "width": 40, "height": 40},
+        }
+
+    monkeypatch.setattr("app.main.match_feature", outside_feature)
+    app = create_app()
+    client = app.test_client()
+    template = make_template(28)
+    search = embed_scaled_template(template, 1.0)
+    res = post_match(client, template, search, threshold=0.55, method="hybrid", max_scale=1.4)
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["bestMatch"]["method"] == "template"
+    assert all(float(item.get("scale") or 0) <= 1.45 for item in data["matches"])
+    assert_click_on_embedded_patch(data["bestMatch"], template, 1.0)
 
 
 def test_match_endpoint_rejects_oversized_base64_payload():

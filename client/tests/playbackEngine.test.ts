@@ -1228,4 +1228,79 @@ describe('PlaybackEngine', () => {
     expect(status.smartClickAnchorDy).toBe(64);
     captureSpy.mockRestore();
   });
+
+  test('an out-of-range feature scale does not become the click', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const template = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 0.7,
+      bounds: { x: 50, y: 30, width: 80, height: 80 },
+    };
+    const feature = {
+      x: 18,
+      y: 238,
+      confidence: 0.83,
+      method: 'feature' as const,
+      scale: 4.34,
+      homography_ok: true,
+      inliers: 20,
+      bounds: { x: 0, y: 200, width: 40, height: 40 },
+    };
+    const expected = { x: 40, y: 30 };
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: expected.x,
+      y: expected.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: Buffer.from('template').toString('base64'),
+    };
+    const run = async (matches: Array<typeof template | typeof feature>, bestMatch: typeof template | typeof feature) => {
+      const engine = new PlaybackEngine({
+        inputPlayer: {} as any,
+        imageService: {
+          matchImage: jest.fn().mockResolvedValue({
+            success: true,
+            matches,
+            bestMatch,
+            processingTimeMs: 8,
+          }),
+        } as any,
+        windowManager: {
+          getTargetBounds: () => ({ x: 500, y: 200, width: 520, height: 360 }),
+          getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 520, height: 360 }),
+        } as any,
+      }) as any;
+      engine.config = {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: true,
+        useRelativeCoords: false,
+        imageMatchThreshold: 0.6,
+      };
+      engine.status = engine.createStatus('playing');
+      const result = await engine.resolveSmartClick(event, expected);
+      return { result, engine };
+    };
+
+    const kept = await run([feature, template], feature);
+    expect(kept.result).toEqual({ x: 590, y: 270 });
+    expect(kept.engine.getStatus().smartClickLastMethod).toBe('template');
+    expect(kept.engine.getStatus().smartClickLastScale).toBeCloseTo(0.7);
+
+    const rejected = await run([feature], feature);
+    expect(rejected.result).toEqual(expected);
+    expect(rejected.engine.getStatus().successfulMatches).toBe(0);
+
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
 });
