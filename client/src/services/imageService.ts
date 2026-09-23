@@ -45,7 +45,7 @@ export class ImageService {
     }
 
     const payload = await this.requestMatch(request);
-    if (key) {
+    if (key && payload.success && payload.bestMatch) {
       this.cache.set(key, {
         response: payload,
         expiresAt: now + CACHE_TTL_MS,

@@ -84,4 +84,40 @@ describe('ImageService budgets', () => {
     expect(settled).toBe(true);
     await pending;
   });
+
+  test('a failed match is searched again', async () => {
+    let calls = 0;
+    global.fetch = jest.fn(async () => {
+      calls += 1;
+      if (calls === 1) {
+        return { ok: false, status: 500, json: async () => ({}) } as Response;
+      }
+      return {
+        ok: true,
+        json: async () => ({
+          success: true,
+          matches: [{ x: 10, y: 20, confidence: 0.91, method: 'template', scale: 1 }],
+          bestMatch: { x: 10, y: 20, confidence: 0.91, method: 'template', scale: 1 },
+          processingTimeMs: 4,
+        }),
+      } as Response;
+    }) as typeof fetch;
+    const service = new ImageService('http://127.0.0.1:5001');
+    const request = {
+      template: 'abc',
+      searchArea: 'def',
+      threshold: 0.6,
+      method: 'template' as const,
+      findAll: false,
+      maxMatches: 1,
+      timeoutMs: 100,
+    };
+
+    const first = await service.matchImage(request);
+    const second = await service.matchImage(request);
+
+    expect(first.success).toBe(false);
+    expect(second.bestMatch).toEqual(expect.objectContaining({ x: 10, y: 20, confidence: 0.91 }));
+    expect(calls).toBe(2);
+  });
 });
