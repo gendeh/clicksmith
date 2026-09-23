@@ -1331,6 +1331,8 @@ export class PlaybackEngine extends EventEmitter {
         expected: { x: number; y: number },
         allowRestart = true,
         telemetry: { open: boolean } = { open: true },
+        deadline?: number,
+        attempt = 0,
     ): Promise<{ x: number; y: number }> {
         const config = this.config;
         if (!config?.useImageMatching || !event.img_patch_b64) {
@@ -1341,7 +1343,8 @@ export class PlaybackEngine extends EventEmitter {
         // Always match with the primary small patch; context patch is reserved for future reranking.
         const templateForMatch = event.img_patch_b64;
         const templateHash = event.img_hash;
-        const startedAt = this.clock.now();
+        const budgetDeadline = deadline ?? this.clock.now() + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
+        const startedAt = budgetDeadline - PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
         const threshold = Math.max(0, Math.min(1, config.imageMatchThreshold));
         const strictThresholdBase = threshold;
         const fullscreenThresholdBase = threshold;
@@ -1467,7 +1470,7 @@ export class PlaybackEngine extends EventEmitter {
                         allowRestart
                     );
                     if (suggestedScale !== null) {
-                        return this.resolveSmartClick(event, expected, false, telemetry);
+                        return this.resolveSmartClick(event, expected, false, telemetry, budgetDeadline, attempt);
                     }
                 }
                 if (pickedWindow) {
@@ -1593,7 +1596,7 @@ export class PlaybackEngine extends EventEmitter {
                         allowRestart
                     );
                     if (suggestedScale !== null) {
-                        return this.resolveSmartClick(event, expected, false, telemetry);
+                        return this.resolveSmartClick(event, expected, false, telemetry, budgetDeadline, attempt);
                     }
                 }
                 if (pickedRegion) {
@@ -1688,7 +1691,7 @@ export class PlaybackEngine extends EventEmitter {
                         allowRestart
                     );
                     if (suggestedScale !== null) {
-                        return this.resolveSmartClick(event, expected, false, telemetry);
+                        return this.resolveSmartClick(event, expected, false, telemetry, budgetDeadline, attempt);
                     }
                 }
                 if (pickedFullscreen) {
@@ -1908,6 +1911,11 @@ export class PlaybackEngine extends EventEmitter {
 
         if (!telemetry.open) {
             return fallbackCoords;
+        }
+        const retriesAllowed = Math.max(0, Math.floor(config.retryCount ?? 0));
+        if (attempt < retriesAllowed && this.clock.now() < budgetDeadline) {
+            this.status = { ...this.status, retries: this.status.retries + 1 };
+            return this.resolveSmartClick(event, expected, true, telemetry, budgetDeadline, attempt + 1);
         }
         this.registerSmartClickFailure();
         this.traceSmartClick('fallback', {
