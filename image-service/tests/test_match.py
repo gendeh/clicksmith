@@ -362,6 +362,99 @@ def test_feature_patch_at_110_percent_reports_that_scale():
     assert abs(float(match["y"]) - center_y) <= 8
 
 
+def test_absent_patch_stops_after_the_endpoint_scales(monkeypatch):
+    from app.main import match_template
+
+    calls = []
+    real = match_template
+
+    def wrapped(*args, **kwargs):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.main.match_template", wrapped)
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(96)
+    search = np.full((640, 640, 3), 18, dtype=np.uint8)
+    search[40:80, 50:90] = (200, 30, 30)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.25,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="template",
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is False
+    assert len(calls) <= 4
+
+
+def test_template_at_125_percent_still_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(96)
+    origin = (40, 50)
+    scale = 1.25
+    search = embed_scaled_template(template, scale, canvas_size=640, origin=origin)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.25,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="template",
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert float(match["confidence"]) > 0.6
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+
+
+def test_patch_on_a_desktop_sized_image_clicks_the_far_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(96)
+    origin = (1400, 700)
+    search = np.zeros((1080, 1920, 3), dtype=np.uint8)
+    search[origin[1] : origin[1] + 96, origin[0] : origin[0] + 96] = template
+    res = client.post(
+        "/match",
+        json={
+            "template": to_base64(template),
+            "searchArea": to_base64(search),
+            "threshold": 0.25,
+            "method": "hybrid",
+            "findAll": True,
+            "maxMatches": 6,
+            "minScale": 0.7,
+            "maxScale": 1.4,
+            "scaleHint": 1.0,
+            "maxBudgetMs": 180,
+        },
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, 1.0, origin)
+    assert float(match["confidence"]) > 0.6
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+    assert int(data["processingTimeMs"]) <= 180
+
+
 def test_ocr_endpoint_returns_line_items():
     app = create_app()
     client = app.test_client()

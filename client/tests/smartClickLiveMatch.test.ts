@@ -1100,6 +1100,112 @@ liveMatch('a textured context at 140% clicks the scaled center', async () => {
   }
 }, 20000);
 
+liveMatch('a screen patch outside the search radius clicks the far center', async () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const serviceDir = '/Users/Shared/OpenClaw_Shared/Git/clicksmith-smartclick-c741/image-service';
+  const python = '/Users/Shared/OpenClaw_Shared/Git/clicksmith/image-service/.venv/bin/python';
+  const raw = execFileSync(
+    python,
+    [
+      '-c',
+      [
+        'import json, os, sys',
+        `sys.path.insert(0, ${JSON.stringify(serviceDir)})`,
+        `os.chdir(${JSON.stringify(serviceDir)})`,
+        'from tests.test_match import make_feature_template, expected_center, to_base64',
+        'import numpy as np',
+        'template = make_feature_template(96)',
+        'origin = (1400, 700)',
+        'desktop = np.zeros((1080, 1920, 3), dtype=np.uint8)',
+        'desktop[origin[1]:origin[1] + 96, origin[0]:origin[0] + 96] = template',
+        'neighborhood = np.zeros((640, 640, 3), dtype=np.uint8)',
+        'neighborhood[40:180, 40:200] = (40, 40, 180)',
+        'cx, cy = expected_center(template, 1.0, origin)',
+        'print(json.dumps({"template": to_base64(template), "neighborhood": to_base64(neighborhood), "desktop": to_base64(desktop), "cx": cx, "cy": cy}))',
+      ].join('\n'),
+    ],
+    { encoding: 'utf8' }
+  );
+  const fixture = JSON.parse(raw) as {
+    template: string;
+    neighborhood: string;
+    desktop: string;
+    cx: number;
+    cy: number;
+  };
+  const patch = Buffer.from(fixture.template, 'base64');
+  const neighborhood = Buffer.from(fixture.neighborhood, 'base64');
+  const desktop = Buffer.from(fixture.desktop, 'base64');
+  const recordedHash = await computeDHash(patch);
+  const recorded = { x: 480, y: 360 };
+  const visual = { x: fixture.cx, y: fixture.cy };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(neighborhood);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(desktop);
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-far-patch',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  const region = captureSpy.mock.calls[0]?.[0] as { x: number; y: number; width: number; height: number } | undefined;
+  const fullscreenCaptures = screenSpy.mock.calls.length;
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  expect(region).toBeDefined();
+  expect(
+    visual.x < region!.x ||
+      visual.x >= region!.x + region!.width ||
+      visual.y < region!.y ||
+      visual.y >= region!.y + region!.height
+  ).toBe(true);
+  expect(fullscreenCaptures).toBeGreaterThan(0);
+  if (Math.abs(result.x - visual.x) > 8 || Math.abs(result.y - visual.y) > 8) {
+    throw new Error(
+      `click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} scale ${status.smartClickLastScale} source ${status.smartClickLastSource} elapsed ${elapsed}`
+    );
+  }
+  expect(result).not.toEqual(recorded);
+  expect(status.smartClickLastSource).toBe('fullscreen');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  if (elapsed >= 460) {
+    throw new Error(`far patch click took ${elapsed}ms at (${result.x}, ${result.y})`);
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

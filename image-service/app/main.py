@@ -51,7 +51,7 @@ def base64_to_cv2(b64_string, *, max_decoded_bytes=MAX_IMAGE_BYTES, max_pixels=M
     return image
 
 
-def match_template(template, search_area, threshold, find_all, max_matches, template_scale=1.0):
+def _match_template_direct(template, search_area, threshold, find_all, max_matches, template_scale=1.0):
     template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
     # Constant/low-variance templates can produce misleading high scores with CCOEFF.
     # Switch to SQDIFF mode (inverted to score map) for those cases.
@@ -107,6 +107,82 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
 
     best_match = matches[0] if matches else None
     return best_match, matches
+
+
+TEMPLATE_PYRAMID_MIN_PIXELS = 640 * 640
+
+
+def match_template(template, search_area, threshold, find_all, max_matches, template_scale=1.0):
+    height, width = search_area.shape[:2]
+    template_h, template_w = template.shape[:2]
+    if height * width <= TEMPLATE_PYRAMID_MIN_PIXELS or template_h < 16 or template_w < 16:
+        return _match_template_direct(
+            template, search_area, threshold, find_all, max_matches, template_scale
+        )
+    small_template = cv2.resize(
+        template,
+        (template_w // 2, template_h // 2),
+        interpolation=cv2.INTER_AREA,
+    )
+    small_h, small_w = small_template.shape[:2]
+    if small_h < 8 or small_w < 8:
+        return _match_template_direct(
+            template, search_area, threshold, find_all, max_matches, template_scale
+        )
+    small_search = cv2.resize(
+        search_area,
+        (width // 2, height // 2),
+        interpolation=cv2.INTER_AREA,
+    )
+    _coarse, coarse_matches = _match_template_direct(
+        small_template, small_search, threshold, find_all, max_matches, template_scale
+    )
+    if not coarse_matches:
+        return None, []
+    refined = []
+    margin = 16
+    for coarse in coarse_matches:
+        center_x = int(coarse["x"]) * 2
+        center_y = int(coarse["y"]) * 2
+        x0 = max(0, center_x - template_w // 2 - margin)
+        y0 = max(0, center_y - template_h // 2 - margin)
+        x1 = min(width, center_x + template_w - template_w // 2 + margin)
+        y1 = min(height, center_y + template_h - template_h // 2 + margin)
+        if x1 - x0 < template_w or y1 - y0 < template_h:
+            continue
+        crop = search_area[y0:y1, x0:x1]
+        _local, local_matches = _match_template_direct(
+            template, crop, threshold, False, 1, template_scale
+        )
+        pad = max(12, max(template_w, template_h) // 2 + 4)
+        for item in local_matches:
+            shifted = dict(item)
+            shifted["x"] = int(item["x"]) + x0
+            shifted["y"] = int(item["y"]) + y0
+            bounds = dict(item.get("bounds") or {})
+            if bounds:
+                bounds["x"] = int(bounds.get("x", 0)) + x0
+                bounds["y"] = int(bounds.get("y", 0)) + y0
+                shifted["bounds"] = bounds
+            if any(
+                abs(shifted["x"] - prev["x"]) <= pad and abs(shifted["y"] - prev["y"]) <= pad
+                for prev in refined
+            ):
+                continue
+            refined.append(shifted)
+            if not find_all:
+                break
+        if not find_all and refined:
+            break
+    if not refined:
+        return None, []
+    refined.sort(key=lambda item: float(item.get("score", item.get("confidence", 0.0))), reverse=True)
+    limit = max(1, min(MAX_MATCHES, int(max_matches)))
+    if find_all:
+        refined = refined[:limit]
+    else:
+        refined = [refined[0]]
+    return refined[0], refined
 
 
 def _clamp_float(value, low, high, default):
@@ -168,6 +244,7 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
 
 
 DECISIVE_TEMPLATE_CONFIDENCE = 0.92
+HOPELESS_TEMPLATE_CONFIDENCE = 0.30
 FLAT_SCALE_SCORE_TIE = 0.02
 
 
@@ -255,9 +332,11 @@ def match_template_multiscale(
                 high = mid - 1
         stopped_on_decisive = best_match is not None
     else:
+        tried = 0
         for scale in scales:
             if not scale_fits():
                 break
+            tried += 1
             candidate_best, candidate_matches = match_at_scale(scale)
             if candidate_best and prefer_candidate(candidate_best, best_match):
                 best_match = candidate_best
@@ -266,6 +345,8 @@ def match_template_multiscale(
                 collected.extend(candidate_matches)
             if best_match and score_of(best_match) >= DECISIVE_TEMPLATE_CONFIDENCE:
                 stopped_on_decisive = True
+                break
+            if tried >= 3 and (best_match is None or score_of(best_match) < HOPELESS_TEMPLATE_CONFIDENCE):
                 break
 
     if not stopped_on_decisive and best_scale is not None and scale_fits():
