@@ -72,6 +72,8 @@ export class RecordingEngine extends EventEmitter {
     private inputHook: InputHook;
     private windowManager: WindowManager;
     private targetBounds: WindowBounds | null = null;
+    private boundsRefresh: Promise<void> | null = null;
+    private boundsRefreshAgain = false;
     private pendingMouseDown = new Map<MouseButton, PendingInput>();
     private pendingKeyDown = new Map<number, PendingInput>();
     private lastMousePosition = { x: 0, y: 0 };
@@ -224,6 +226,7 @@ export class RecordingEngine extends EventEmitter {
         if (this.config.captureImages) {
             this.queueImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
         }
+        this.refreshRecordingBounds();
     }
 
     private attachListeners() {
@@ -231,6 +234,7 @@ export class RecordingEngine extends EventEmitter {
             const mouse = event as HookMouseEvent;
             this.lastMousePosition = { x: mouse.x, y: mouse.y };
             this.getEventTimeMs(mouse, process.hrtime.bigint());
+            this.refreshRecordingBounds();
         });
 
         this.inputHook.on('mousedown', (event: HookEvent) => this.handleMouseDown(event as HookMouseEvent));
@@ -278,6 +282,7 @@ export class RecordingEngine extends EventEmitter {
         if (this.config.captureImages) {
             this.queueImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
         }
+        this.refreshRecordingBounds();
     }
 
     private async handleMouseUp(event: HookMouseEvent) {
@@ -491,6 +496,31 @@ export class RecordingEngine extends EventEmitter {
         } finally {
             if (timer) clearTimeout(timer);
         }
+    }
+
+    private refreshRecordingBounds() {
+        if (!this.isRecording || !this.config) return;
+        const target = this.config.target;
+        const normalized = (target || '').trim().toLowerCase();
+        if (!normalized || normalized === 'screen') return;
+        const lookup = this.windowManager.getTargetBoundsAsync;
+        if (typeof lookup !== 'function') return;
+        if (this.boundsRefresh) {
+            this.boundsRefreshAgain = true;
+            return;
+        }
+        this.boundsRefresh = Promise.resolve(lookup.call(this.windowManager, target))
+            .then((bounds) => {
+                if (bounds && this.isRecording) this.targetBounds = bounds;
+            })
+            .catch(() => undefined)
+            .finally(() => {
+                this.boundsRefresh = null;
+                if (this.boundsRefreshAgain && this.isRecording) {
+                    this.boundsRefreshAgain = false;
+                    this.refreshRecordingBounds();
+                }
+            });
     }
 
     private getRelativeCoords(x: number, y: number) {

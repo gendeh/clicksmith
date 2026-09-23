@@ -217,4 +217,32 @@ describe('RecordingEngine', () => {
     expect(event.x).toBe(540);
     expect(event.y).toBe(230);
   });
+
+  test('a click after the window moves is stored against the new window', async () => {
+    const hook = new MockInputHook();
+    let bounds = { x: 500, y: 200, width: 800, height: 600 };
+    const recorder = new RecordingEngine({
+      inputHook: hook,
+      windowManager: {
+        getTargetBounds: () => bounds,
+        getTargetBoundsAsync: async () => bounds,
+      } as any,
+    });
+
+    await recorder.start({ ...mockConfig, minEventInterval: 0 });
+    hook.emit('mousedown', { x: 540, y: 230, button: 1 });
+    bounds = { x: 800, y: 100, width: 800, height: 600 };
+    hook.emit('mousemove', { x: 840, y: 130 });
+    for (let turn = 0; turn < 4; turn += 1) {
+      await flushMicrotasks();
+    }
+    hook.emit('mousedown', { x: 840, y: 130, button: 1 });
+    const result = await recorder.stop();
+    const events = result.profile.events;
+
+    expect(events[0].rel_x).toBeCloseTo(0.05);
+    expect(events[0].rel_y).toBeCloseTo(0.05);
+    expect(events[1].rel_x).toBeCloseTo(0.05);
+    expect(events[1].rel_y).toBeCloseTo(0.05);
+  });
 });
