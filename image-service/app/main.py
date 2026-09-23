@@ -408,6 +408,40 @@ def match_feature(template, search_area):
     }
 
 
+def match_feature_multiscale(template, search_area, min_scale, max_scale, scale_hint, deadline):
+    best = None
+    for scale in build_scale_candidates(min_scale, max_scale, scale_hint):
+        if time.perf_counter() >= deadline:
+            break
+        if abs(scale - 1.0) < 1e-6:
+            sized = template
+        else:
+            sized = cv2.resize(
+                template,
+                dsize=None,
+                fx=scale,
+                fy=scale,
+                interpolation=cv2.INTER_AREA if scale < 1.0 else cv2.INTER_LINEAR,
+            )
+        height, width = sized.shape[:2]
+        if height < 12 or width < 12 or height > search_area.shape[0] or width > search_area.shape[1]:
+            continue
+        hit = match_feature(sized, search_area)
+        if not hit or hit.get("homography_ok") is not True:
+            continue
+        reported = float(hit.get("scale") or 0.0)
+        inliers = int(hit.get("inliers") or 0)
+        if inliers < 8 or abs(reported - 1.0) > 0.12:
+            continue
+        chosen = dict(hit)
+        chosen["scale"] = float(scale)
+        if best is None or inliers > int(best.get("inliers") or 0):
+            best = chosen
+        if inliers >= 24 and abs(reported - 1.0) <= 0.04:
+            break
+    return best
+
+
 def scale_within_request(scale, min_scale, max_scale, slack=0.25):
     if scale is None:
         return True
@@ -476,7 +510,17 @@ def match_image():
                 or best_match["confidence"] < max(0.82, threshold + 0.12)
             )
             if should_try_feature:
-                feature_match = match_feature(template, search_area)
+                if method == "feature":
+                    feature_match = match_feature_multiscale(
+                        template,
+                        search_area,
+                        min_scale,
+                        max_scale,
+                        scale_hint,
+                        deadline,
+                    )
+                else:
+                    feature_match = match_feature(template, search_area)
                 if feature_match and not scale_within_request(
                     feature_match.get("scale"), min_scale, max_scale
                 ):

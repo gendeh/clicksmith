@@ -281,6 +281,60 @@ def test_feature_match_returns_estimated_scale_for_homography():
     assert float(data["bestMatch"]["scale"]) > 0.0
 
 
+def test_feature_patch_at_140_percent_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(128)
+    origin = (40, 50)
+    scale = 1.4
+    search = embed_scaled_template(template, scale, canvas_size=640, origin=origin)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="feature",
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+
+
+def test_feature_patch_at_70_percent_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(128)
+    origin = (40, 50)
+    scale = 0.7
+    search = embed_scaled_template(template, scale, canvas_size=480, origin=origin)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="feature",
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+
+
 def test_ocr_endpoint_returns_line_items():
     app = create_app()
     client = app.test_client()
