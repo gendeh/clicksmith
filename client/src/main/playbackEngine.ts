@@ -1217,9 +1217,8 @@ export class PlaybackEngine extends EventEmitter {
             const featureReliable =
                 method !== 'feature' ||
                 featureHomography ||
-                (featureInliers !== undefined
-                    ? featureInliers >= (adaptationMode ? 6 : 8)
-                    : candidate.confidence >= (adaptationMode ? 0.52 : 0.72));
+                (featureInliers !== undefined && featureInliers >= (adaptationMode ? 6 : 8)) ||
+                candidate.confidence >= baseThreshold;
             if (!featureReliable) {
                 continue;
             }

@@ -985,4 +985,59 @@ describe('PlaybackEngine', () => {
     regionSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('a 0.66 feature match without homography still clicks the window', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.66,
+      method: 'feature' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 6,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 40,
+        y: 30,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+      },
+      { x: 40, y: 30 }
+    );
+
+    expect(result).toEqual({ x: 590, y: 270 });
+    expect(engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.66);
+    captureSpy.mockRestore();
+  });
 });
