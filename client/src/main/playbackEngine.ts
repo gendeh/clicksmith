@@ -1920,6 +1920,14 @@ export class PlaybackEngine extends EventEmitter {
                     : null;
                 if (pickedOcr) {
                     if (!telemetry.open) return pickedOcr.coords;
+                    if (
+                        (!adaptationMode || pickedOcr.confidence >= 0.80) &&
+                        !this.hasMeaningfulScaleShift(pickedOcr.scale)
+                    ) {
+                        this.setSmartClickAnchor(relativeFallback ?? expected, pickedOcr.coords);
+                    } else if (this.smartClickAnchor) {
+                        this.clearSmartClickAnchor();
+                    }
                     this.recordSmartClickStableScale(this.smartClickScaleHint ?? undefined);
                     this.smartClickConsecutiveFailures = 0;
                     if (this.smartClickAdaptationClicksLeft > 0) {
