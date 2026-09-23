@@ -9,6 +9,7 @@ import {
   ModAdapterStatus,
   WindowInfo,
 } from '../types';
+import { formatSmartClickStatsLine } from '../services/smartClickStats';
 
 type DraftProfile = {
   target_app: string;
@@ -809,10 +810,8 @@ const App: React.FC = () => {
               />
             </div>
 
-            <div className="profile-meta">
-              SmartClick stats: {playbackStatus?.successfulMatches ?? 0} matched, {playbackStatus?.failedMatches ?? 0}{' '}
-              fallback, {playbackStatus?.retries ?? 0} retries
-              {playbackStatus?.lastError ? `, last: ${playbackStatus.lastError}` : ''}.
+            <div className="profile-meta" data-testid="smartclick-stats">
+              {formatSmartClickStatsLine(playbackStatus)}
             </div>
 
             <div className="adapter-card">
