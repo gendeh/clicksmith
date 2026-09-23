@@ -1850,6 +1850,143 @@ liveMatch('a re-rendered Sunflower among similar buttons clicks Sunflower', asyn
   }
 }, 20000);
 
+liveMatch('each re-rendered harness button clicks itself, then A then C', async () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const serviceDir = '/Users/Shared/OpenClaw_Shared/Git/clicksmith-smartclick-c741/image-service';
+  const python = '/Users/Shared/OpenClaw_Shared/Git/clicksmith/image-service/.venv/bin/python';
+  const raw = execFileSync(
+    python,
+    [
+      '-c',
+      [
+        'import json, os, sys',
+        'import cv2, numpy as np',
+        `sys.path.insert(0, ${JSON.stringify(serviceDir)})`,
+        `os.chdir(${JSON.stringify(serviceDir)})`,
+        'from tests.test_match import to_base64',
+        'def button(scale, label, fill):',
+        '    width = max(2, int(220 * scale))',
+        '    height = max(2, int(48 * scale))',
+        '    image = np.full((height, width, 3), fill, dtype=np.uint8)',
+        '    cv2.rectangle(image, (1, 1), (width - 2, height - 2), (17, 24, 39), 2)',
+        '    cv2.putText(image, label, (8, max(12, int(32 * scale))), cv2.FONT_HERSHEY_SIMPLEX, max(0.3, 0.7 * scale), (20, 20, 20), max(1, int(2 * scale)), cv2.LINE_AA)',
+        '    return image',
+        'fills = {"A": ((199, 243, 254), "Target A: Sunflower"), "B": ((229, 250, 209), "Target B: Mint"), "C": ((254, 234, 219), "Target C: Ocean"), "D": ((226, 226, 254), "Target D: Coral")}',
+        'search = np.full((600, 800, 3), 245, dtype=np.uint8)',
+        'spots = {"A": (40, 110), "B": (280, 110), "C": (520, 110), "D": (40, 400)}',
+        'centers = {}',
+        'for key, (x, y) in spots.items():',
+        '    img = button(0.7, fills[key][1], fills[key][0])',
+        '    h, w = img.shape[:2]',
+        '    search[y:y + h, x:x + w] = img',
+        '    centers[key] = [x + w / 2.0, y + h / 2.0]',
+        'templates = {key: to_base64(button(1.0, fills[key][1], fills[key][0])) for key in fills}',
+        'print(json.dumps({"templates": templates, "search": to_base64(search), "centers": centers}))',
+      ].join('\n'),
+    ],
+    { encoding: 'utf8' }
+  );
+  const fixture = JSON.parse(raw) as {
+    templates: Record<string, string>;
+    search: string;
+    centers: Record<string, [number, number]>;
+  };
+  const search = Buffer.from(fixture.search, 'base64');
+  const windowOrigin = { x: 120, y: 80 };
+  const windowSize = { width: 800, height: 600 };
+  const recorded = {
+    x: Math.round(windowOrigin.x + windowSize.width * 0.25),
+    y: Math.round(windowOrigin.y + 40),
+  };
+  const click = async (engine: any, key: string) => {
+    const patch = Buffer.from(fixture.templates[key], 'base64');
+    const recordedHash = await computeDHash(patch);
+    const started = Date.now();
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: recorded.x,
+        y: recorded.y,
+        rel_x: 0.25,
+        rel_y: 40 / 600,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: patch.toString('base64'),
+        metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+      },
+      recorded
+    );
+    return { result, elapsed: Date.now() - started, status: engine.getStatus() };
+  };
+  const makeEngine = () => {
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService,
+      windowManager: {
+        getTargetBounds: () => ({ ...windowOrigin, ...windowSize }),
+        getTargetBoundsAsync: async () => ({ ...windowOrigin, ...windowSize }),
+      } as any,
+    }) as any;
+    engine.config = {
+      profileId: 'live-harness',
+      target: 'Terminal',
+      useImageMatching: true,
+      imageMatchThreshold: 0.6,
+      timingTolerance: 20,
+      retryCount: 0,
+      retryDelay: 10,
+      takeoverHotkey: 'F11',
+      speedMultiplier: 1,
+      useRelativeCoords: true,
+      imageSearchRadius: 160,
+    };
+    engine.status = engine.createStatus('playing');
+    return engine;
+  };
+  for (const key of ['A', 'B', 'C', 'D']) {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+      throw new Error('full screen capture');
+    });
+    const engine = makeEngine();
+    const { result, elapsed, status } = await click(engine, key);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+    const visual = {
+      x: windowOrigin.x + fixture.centers[key][0],
+      y: windowOrigin.y + fixture.centers[key][1],
+    };
+    if (Math.abs(result.x - visual.x) > 8 || Math.abs(result.y - visual.y) > 8 || elapsed >= 460) {
+      throw new Error(
+        `${key} click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} scale ${status.smartClickLastScale} source ${status.smartClickLastSource} dHash ${status.smartClickLastDHashDistance} elapsed ${elapsed}`
+      );
+    }
+  }
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const sequence = makeEngine();
+  for (const key of ['A', 'C']) {
+    const { result, elapsed, status } = await click(sequence, key);
+    const visual = {
+      x: windowOrigin.x + fixture.centers[key][0],
+      y: windowOrigin.y + fixture.centers[key][1],
+    };
+    if (Math.abs(result.x - visual.x) > 8 || Math.abs(result.y - visual.y) > 8 || elapsed >= 460) {
+      throw new Error(
+        `sequence ${key} click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} scale ${status.smartClickLastScale} source ${status.smartClickLastSource} dHash ${status.smartClickLastDHashDistance} elapsed ${elapsed}`
+      );
+    }
+  }
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+}, 30000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

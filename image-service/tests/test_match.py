@@ -474,6 +474,46 @@ def test_rerendered_button_at_70_percent_clicks_the_center():
     assert int(data["processingTimeMs"]) <= 260
 
 
+def test_learned_hint_still_clicks_the_rerendered_70_percent_button():
+    from app.main import build_scale_candidates
+
+    near_recorded = build_scale_candidates(0.7, 1.4, 1.0)
+    assert near_recorded[:7] == [1.0, 0.7, 1.4, 1.1, 0.9, 1.2, 0.67]
+    learned = build_scale_candidates(0.7, 1.4, 0.82)
+    assert learned[:4] == [0.82, 0.7, 0.67, 1.4]
+
+    app = create_app()
+    client = app.test_client()
+    template = redraw_text_button(1.0)
+    origin = (40, 50)
+    button = redraw_text_button(0.7)
+    search = np.full((640, 640, 3), 245, dtype=np.uint8)
+    height, width = button.shape[:2]
+    search[origin[1] : origin[1] + height, origin[0] : origin[0] + width] = button
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.25,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=0.82,
+        method="hybrid",
+        max_budget_ms=260,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x = origin[0] + width / 2.0
+    center_y = origin[1] + height / 2.0
+    assert float(match["confidence"]) > 0.6
+    assert abs(float(match["scale"]) - 0.67) <= 0.05
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+    assert int(data["processingTimeMs"]) <= 260
+
+
 def test_hybrid_at_120_percent_clicks_the_scaled_center():
     app = create_app()
     client = app.test_client()
