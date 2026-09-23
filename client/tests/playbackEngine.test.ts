@@ -2382,7 +2382,10 @@ describe('PlaybackEngine', () => {
       imageMatchThreshold: 0.6,
       retryCount: 0,
     };
-    engine.status = engine.createStatus('playing');
+    engine.status = {
+      ...engine.createStatus('playing'),
+      smartClickLastScale: 1.4,
+    };
     const event = {
       t_ms: 0,
       type: 'mouse' as const,
@@ -2410,6 +2413,7 @@ describe('PlaybackEngine', () => {
     expect(engine.getStatus().smartClickLastSource).toBe('window');
     expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
     expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    expect(engine.getStatus().smartClickLastScale).toBeUndefined();
     captureSpy.mockRestore();
     screenSpy.mockRestore();
     jest.useRealTimers();
@@ -2426,6 +2430,7 @@ describe('PlaybackEngine', () => {
       smartClickLastConfidence: 1,
       smartClickLastSource: 'window',
       smartClickLastDHashDistance: 0,
+      smartClickLastScale: 1.4,
     };
     engine.smartClickPromises.set(0, new Promise(() => {}));
     engine.smartClickTelemetry.set(0, { open: true });
@@ -2448,6 +2453,7 @@ describe('PlaybackEngine', () => {
     expect(engine.getStatus().smartClickLastSource).toBe('expected_fallback');
     expect(engine.getStatus().smartClickLastConfidence).toBeUndefined();
     expect(engine.getStatus().smartClickLastDHashDistance).toBeUndefined();
+    expect(engine.getStatus().smartClickLastScale).toBeUndefined();
     jest.useRealTimers();
   });
 

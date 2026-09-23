@@ -1087,7 +1087,7 @@ export class PlaybackEngine extends EventEmitter {
             smartClickLastMethod: method,
             smartClickLastConfidence: confidence,
             smartClickLastDHashDistance: dhashDistance,
-            smartClickLastScale: Number.isFinite(scale) ? Number(scale) : this.status.smartClickLastScale,
+            smartClickLastScale: typeof scale === 'number' && Number.isFinite(scale) ? Number(scale) : undefined,
             smartClickRecordedScale: this.smartClickRecordedScale ?? undefined,
             smartClickLastStableScale: this.smartClickLastStableScale ?? undefined,
             smartClickScaleHint: this.smartClickScaleHint ?? undefined,

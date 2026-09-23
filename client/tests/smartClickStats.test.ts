@@ -1,7 +1,7 @@
 import { formatSmartClickStatsLine } from '../src/services/smartClickStats';
 
 describe('formatSmartClickStatsLine', () => {
-  test('exposes source, confidence, dHash, and anchor when a match is accepted', () => {
+  test('exposes source, confidence, dHash, anchor, and scale when a match is accepted', () => {
     expect(
       formatSmartClickStatsLine({
         successfulMatches: 2,
@@ -12,15 +12,16 @@ describe('formatSmartClickStatsLine', () => {
         smartClickLastDHashDistance: 0,
         smartClickAnchorDx: 0,
         smartClickAnchorDy: 0,
+        smartClickLastScale: 1.4,
       })
     ).toBe(
-      'SmartClick stats: 2 matched, 1 fallback, 0 retries, source window, confidence 1.00, dHash 0, anchor (0, 0).'
+      'SmartClick stats: 2 matched, 1 fallback, 0 retries, source window, confidence 1.00, dHash 0, anchor (0, 0), scale 1.40.'
     );
   });
 
-  test('keeps the four triage fields visible before any match', () => {
+  test('keeps the triage fields visible before any match', () => {
     expect(formatSmartClickStatsLine(null)).toBe(
-      'SmartClick stats: 0 matched, 0 fallback, 0 retries, source n/a, confidence n/a, dHash n/a, anchor n/a.'
+      'SmartClick stats: 0 matched, 0 fallback, 0 retries, source n/a, confidence n/a, dHash n/a, anchor n/a, scale n/a.'
     );
   });
 
@@ -35,7 +36,7 @@ describe('formatSmartClickStatsLine', () => {
         lastError: 'image_service_unavailable',
       })
     ).toBe(
-      'SmartClick stats: 0 matched, 1 fallback, 1 retries, source expected_fallback, confidence n/a, dHash n/a, anchor n/a, last: image_service_unavailable.'
+      'SmartClick stats: 0 matched, 1 fallback, 1 retries, source expected_fallback, confidence n/a, dHash n/a, anchor n/a, scale n/a, last: image_service_unavailable.'
     );
   });
 });

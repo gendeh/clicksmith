@@ -9,6 +9,7 @@ type SmartClickStats = Pick<
   | 'smartClickLastSource'
   | 'smartClickLastConfidence'
   | 'smartClickLastDHashDistance'
+  | 'smartClickLastScale'
   | 'smartClickAnchorDx'
   | 'smartClickAnchorDy'
 >;
@@ -25,6 +26,7 @@ export function formatSmartClickStatsLine(status: SmartClickStats | null | undef
   const source = status?.smartClickLastSource?.trim() || 'n/a';
   const confidence = finiteText(status?.smartClickLastConfidence, 2);
   const dhash = finiteText(status?.smartClickLastDHashDistance);
+  const scale = finiteText(status?.smartClickLastScale, 2);
   const dx = status?.smartClickAnchorDx;
   const dy = status?.smartClickAnchorDy;
   const anchor =
@@ -35,5 +37,5 @@ export function formatSmartClickStatsLine(status: SmartClickStats | null | undef
       ? `(${dx}, ${dy})`
       : 'n/a';
   const last = status?.lastError ? `, last: ${status.lastError}` : '';
-  return `SmartClick stats: ${matched} matched, ${failed} fallback, ${retries} retries, source ${source}, confidence ${confidence}, dHash ${dhash}, anchor ${anchor}${last}.`;
+  return `SmartClick stats: ${matched} matched, ${failed} fallback, ${retries} retries, source ${source}, confidence ${confidence}, dHash ${dhash}, anchor ${anchor}, scale ${scale}${last}.`;
 }

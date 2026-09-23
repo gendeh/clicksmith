@@ -466,3 +466,27 @@ def test_large_template_miss_returns_inside_the_requested_budget():
     assert data["success"] is False
     assert data["bestMatch"] is None
     assert data["processingTimeMs"] <= 180
+
+
+def test_flat_template_clicks_the_matching_patch_not_the_brighter_decoy():
+    app = create_app()
+    client = app.test_client()
+    search = np.full((220, 240, 3), 30, dtype=np.uint8)
+    search[10:50, 10:50] = (210, 210, 210)
+    search[90:130, 140:180] = (140, 140, 140)
+    template = np.full((40, 40, 3), 140, dtype=np.uint8)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=1.0,
+        max_scale=1.0,
+        scale_hint=1.0,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["bestMatch"]["confidence"] > 0.6
+    assert abs(float(data["bestMatch"]["x"]) - 160) <= 2
+    assert abs(float(data["bestMatch"]["y"]) - 110) <= 2
