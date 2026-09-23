@@ -1439,6 +1439,7 @@ export class PlaybackEngine extends EventEmitter {
             );
         }
         const preferredBounds = this.smartClickAttemptBounds;
+        expected = this.relativeFallbackPoint(event, preferredBounds) ?? expected;
         const budgetDeadline = deadline ?? this.clock.now() + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
         const startedAt = budgetDeadline - PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
         if (preferredBounds) {

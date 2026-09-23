@@ -2233,4 +2233,69 @@ describe('PlaybackEngine', () => {
     screenSpy.mockRestore();
     jest.useRealTimers();
   });
+
+  test('anchor ranking follows the live window when the caller point is stale', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const decoy = {
+      x: 0,
+      y: 170,
+      confidence: 0.72,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 0, y: 154, width: 32, height: 32 },
+    };
+    const truth = {
+      x: 90,
+      y: 70,
+      confidence: 0.7,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [decoy, truth],
+          bestMatch: decoy,
+          processingTimeMs: 5,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 800, y: 100, width: 800, height: 600 }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    engine.smartClickAnchor = { dx: 50, dy: 40 };
+    engine.smartClickAnchorTrust = 4;
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 40,
+        y: 30,
+        rel_x: 0.05,
+        rel_y: 0.05,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+      },
+      { x: 540, y: 230 }
+    );
+
+    expect(result).toEqual({ x: 890, y: 170 });
+    captureSpy.mockRestore();
+  });
 });
