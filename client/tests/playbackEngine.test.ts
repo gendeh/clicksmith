@@ -1522,4 +1522,119 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('a live window lookup inside the click budget clicks the moved window', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 5,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: () => new Promise((resolve) => {
+          setTimeout(() => resolve({ x: 800, y: 100, width: 800, height: 600 }), 180);
+        }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+    const pending = engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 40,
+        y: 30,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+      },
+      { x: 40, y: 30 }
+    );
+    await jest.advanceTimersByTimeAsync(180);
+    await expect(pending).resolves.toEqual({ x: 890, y: 170 });
+    expect(captureSpy.mock.calls[0][0]).toEqual(expect.objectContaining({ x: 800, y: 100 }));
+    expect(engine.getStatus().smartClickLastSource).toBe('window');
+    expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    captureSpy.mockRestore();
+    jest.useRealTimers();
+  });
+
+  test('a window lookup that misses the click budget does not search the stale rectangle', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [],
+          bestMatch: null,
+          processingTimeMs: 4,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: () => new Promise((resolve) => {
+          setTimeout(() => resolve({ x: 800, y: 100, width: 800, height: 600 }), 400);
+        }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+    const pending = engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 40,
+        y: 30,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+      },
+      { x: 40, y: 30 }
+    );
+    await jest.advanceTimersByTimeAsync(200);
+    await expect(pending).resolves.toEqual({ x: 40, y: 30 });
+    expect(captureSpy.mock.calls.some(call => call[0]?.x === 500 && call[0]?.y === 200)).toBe(false);
+    expect(engine.getStatus().successfulMatches).toBe(0);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+    jest.useRealTimers();
+  });
 });

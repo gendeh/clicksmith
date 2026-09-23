@@ -73,6 +73,8 @@ export class PlaybackEngine extends EventEmitter {
     private smartClickTelemetry = new Map<number, { open: boolean }>();
     private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS = 260;
     private static readonly SMART_CLICK_MAX_BUDGET_MS = 260;
+    private static readonly SMART_CLICK_BOUNDS_WAIT_MS = 200;
+    private static readonly SMART_CLICK_BOUNDS_MATCH_RESERVE_MS = 60;
     private static readonly SMART_CLICK_MIN_SCALE = 0.7;
     private static readonly SMART_CLICK_MAX_SCALE = 1.4;
     private static readonly SMART_CLICK_ADAPTIVE_MIN_SCALE = 0.55;
@@ -303,22 +305,39 @@ export class PlaybackEngine extends EventEmitter {
         }
     }
 
-    private async getSmartClickTargetBoundsAsync(): Promise<WindowBounds | null> {
+    private async getSmartClickTargetBoundsAsync(deadline?: number): Promise<WindowBounds | null> {
         if (!this.config?.useImageMatching) return null;
         const normalizedTarget = (this.config.target || '').trim().toLowerCase();
         if (!normalizedTarget || normalizedTarget === 'screen') {
             return null;
         }
+        const lookupFn = this.windowManager.getTargetBoundsAsync;
+        if (typeof lookupFn !== 'function') {
+            return this.getSmartClickTargetBoundsSync();
+        }
+        const budgetLeft = deadline === undefined
+            ? PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS
+            : Math.max(0, deadline - this.clock.now());
+        const waitMs = Math.min(
+            PlaybackEngine.SMART_CLICK_BOUNDS_WAIT_MS,
+            Math.max(0, budgetLeft - PlaybackEngine.SMART_CLICK_BOUNDS_MATCH_RESERVE_MS)
+        );
+        let timer: NodeJS.Timeout | null = null;
         try {
+            const lookup = lookupFn.call(this.windowManager, this.config.target);
             const asyncBounds = await Promise.race([
-                this.windowManager.getTargetBoundsAsync(this.config.target),
-                new Promise<WindowBounds | null>((resolve) => setTimeout(() => resolve(null), 120)),
+                lookup,
+                new Promise<WindowBounds | null>((resolve) => {
+                    timer = this.clock.setTimeout(() => resolve(null), waitMs);
+                }),
             ]);
             if (asyncBounds) return asyncBounds;
+            return null;
         } catch {
-            // fall through to sync
+            return this.getSmartClickTargetBoundsSync();
+        } finally {
+            if (timer) this.clock.clearTimeout(timer);
         }
-        return this.getSmartClickTargetBoundsSync();
     }
 
     private async dispatchDueActions() {
@@ -1370,7 +1389,7 @@ export class PlaybackEngine extends EventEmitter {
         const desktopBounds = CoordinateNormalizer.getVirtualLogicalBounds();
         const desktopRight = desktopBounds.x + desktopBounds.width;
         const desktopBottom = desktopBounds.y + desktopBounds.height;
-        const preferredBounds = await this.getSmartClickTargetBoundsAsync();
+        const preferredBounds = await this.getSmartClickTargetBoundsAsync(budgetDeadline);
         if (preferredBounds) {
             if (this.hasSignificantTargetBoundsChange(preferredBounds)) {
                 this.enterSmartClickAdaptationMode(undefined, 'bounds_change');
