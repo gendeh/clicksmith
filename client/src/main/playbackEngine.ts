@@ -180,8 +180,18 @@ export class PlaybackEngine extends EventEmitter {
         this.smartClickAttemptBounds = null;
         this.smartClickConsecutiveFailures = 0;
         this.smartClickAdaptationReason = null;
+        const normalizedTarget = (config.target || '').trim().toLowerCase();
+        const namedTarget = normalizedTarget.length > 0 && normalizedTarget !== 'screen';
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
         let boundsTimer: NodeJS.Timeout | null = null;
+        const knownBounds = () => {
+            const knownLookup = (this.windowManager as {
+                getKnownTargetBounds?: (target: string) => WindowBounds | null;
+            }).getKnownTargetBounds;
+            return typeof knownLookup === 'function'
+                ? knownLookup.call(this.windowManager, config.target)
+                : null;
+        };
         try {
             const asyncBounds = await Promise.race([
                 this.windowManager.getTargetBoundsAsync(config.target),
@@ -194,9 +204,13 @@ export class PlaybackEngine extends EventEmitter {
             ]);
             if (asyncBounds) {
                 this.targetBounds = asyncBounds;
+            } else if (namedTarget) {
+                this.targetBounds = knownBounds();
             }
         } catch {
-            // keep sync fallback bounds
+            if (namedTarget) {
+                this.targetBounds = knownBounds();
+            }
         } finally {
             if (boundsTimer) this.clock.clearTimeout(boundsTimer);
         }

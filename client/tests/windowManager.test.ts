@@ -62,6 +62,19 @@ describe('WindowManager live bounds', () => {
       width: 800,
       height: 600,
     });
+    expect(manager.getKnownTargetBounds('Terminal')).toEqual({
+      x: 800,
+      y: 100,
+      width: 800,
+      height: 600,
+    });
     jest.useRealTimers();
+  });
+
+  test('an unknown window is not the desktop', () => {
+    const manager = new WindowManager();
+    (manager as any).nativeLoadAttempted = true;
+    (manager as any).nativeManager = null;
+    expect(manager.getKnownTargetBounds('Terminal')).toBeNull();
   });
 });

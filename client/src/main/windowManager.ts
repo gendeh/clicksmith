@@ -281,6 +281,17 @@ export class WindowManager {
         return request;
     }
 
+    public getKnownTargetBounds(target: string): WindowBounds | null {
+        const normalizedTarget = (target || '').trim().toLowerCase();
+        if (!normalizedTarget || normalizedTarget === 'screen') {
+            return this.getFallbackWindowInfo().bounds;
+        }
+        return (
+            this.getImmediateTargetBoundsFromNative(normalizedTarget) ??
+            this.getLastKnownTargetBounds(normalizedTarget)
+        );
+    }
+
     public getTargetBounds(target: string): WindowBounds {
         const normalizedTarget = (target || '').trim().toLowerCase();
         if (!normalizedTarget || normalizedTarget === 'screen') {
