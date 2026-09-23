@@ -418,20 +418,10 @@ export class PlaybackEngine extends EventEmitter {
                     ? await this.getSmartClickCoords(index, action.event, this.resolveCoords(action.event))
                     : null;
 
-            // Capture actualAt AFTER the SmartClick await so the image match
-            // wait time does not inflate the timing drift measurement.
             const actualAt = this.clock.now();
-
-            // Resync the timeline so that SmartClick wait time doesn't
-            // cascade drift to every subsequent event.
-            const smartClickWait = actualAt - scheduledAt;
-            if (smartClickWait > tolerance && coords !== null) {
-                this.startedAt += smartClickWait;
-            }
 
             let shouldAdvanceIndex = true;
             try {
-                // Playback state may change while awaiting SmartClick matching.
                 if (!this.isPlaying) {
                     shouldAdvanceIndex = false;
                     break;
@@ -441,6 +431,11 @@ export class PlaybackEngine extends EventEmitter {
                 this.status = { ...this.status, lastError: 'playback_event_failed' };
                 this.emit('error', error);
             } finally {
+                const postedAt = this.clock.now();
+                const smartClickWait = postedAt - scheduledAt;
+                if (smartClickWait > tolerance && coords !== null) {
+                    this.startedAt += smartClickWait;
+                }
                 this.smartClickResults.delete(index);
                 if (shouldAdvanceIndex) {
                     this.currentActionIndex = index + 1;

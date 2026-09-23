@@ -2798,4 +2798,91 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('posting a SmartClick does not mark its release as late', async () => {
+    jest.useFakeTimers();
+    let now = 1_000_000;
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const clicks: Array<{ x: number; y: number }> = [];
+    const engine = new PlaybackEngine({
+      clock: {
+        now: () => now,
+        setTimeout: (handler, timeout) => setTimeout(handler, timeout ?? 0),
+        clearTimeout: (timer) => clearTimeout(timer),
+      },
+      inputPlayer: {
+        moveMouse: (x: number, y: number) => {
+          now += 30;
+          clicks.push({ x, y });
+        },
+        mouseDown: () => {
+          now += 30;
+        },
+        mouseUp: () => {
+          now += 1;
+        },
+        keyDown: () => undefined,
+        keyUp: () => undefined,
+      } as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 5,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+      } as any,
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      target_app: 'Terminal',
+      events: [
+        {
+          t_ms: 0,
+          type: 'mouse',
+          btn: 'left',
+          x: 40,
+          y: 30,
+          rel_x: 0.05,
+          rel_y: 0.05,
+          duration_ms: 0,
+          human_override: false,
+          img_patch_b64: Buffer.from('template').toString('base64'),
+        },
+      ],
+    };
+
+    const started = engine.start(
+      {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: true,
+        useRelativeCoords: false,
+        imageMatchThreshold: 0.6,
+        timingTolerance: 20,
+      },
+      profile
+    );
+    await jest.advanceTimersByTimeAsync(500);
+    await started;
+
+    expect(clicks[0]).toEqual({ x: 590, y: 270 });
+    expect(engine.getStatus().lastError).toBeUndefined();
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+    jest.useRealTimers();
+  });
 });
