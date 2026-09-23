@@ -1730,8 +1730,8 @@ export class PlaybackEngine extends EventEmitter {
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
                     timeoutMs: Math.max(40, Math.min(stageTimeoutMs('target_window'), 220)),
-                    minScale: PlaybackEngine.SMART_CLICK_ADAPTIVE_MIN_SCALE,
-                    maxScale: PlaybackEngine.SMART_CLICK_ADAPTIVE_MAX_SCALE,
+                    minScale: scaleWindow.minScale,
+                    maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
                     maxBudgetMs: contextBudget,
                 });

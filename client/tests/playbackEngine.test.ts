@@ -947,7 +947,7 @@ describe('PlaybackEngine', () => {
         inliers: 12,
         bounds: { x: 20, y: 10, width: 40, height: 40 },
       };
-      const matchImage = jest.fn(async (request: { method?: string; threshold?: number }) => {
+      const matchImage = jest.fn(async (request: { method?: string; threshold?: number; minScale?: number; maxScale?: number }) => {
         if (request.method === 'feature') {
           return { success: true, matches: [feature], bestMatch: feature, processingTimeMs: 8 };
         }
@@ -976,6 +976,8 @@ describe('PlaybackEngine', () => {
 
     const accepted = await run(0.66);
     expect(accepted.featureRequest?.threshold).toBeGreaterThanOrEqual(0.6);
+    expect(accepted.featureRequest?.minScale).toBeCloseTo(0.7);
+    expect(accepted.featureRequest?.maxScale).toBeCloseTo(1.4);
     expect(accepted.result).toEqual({ x: 540, y: 230 });
     expect(accepted.engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.66);
 
