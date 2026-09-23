@@ -609,6 +609,15 @@ def create_app():
     return app
 
 
+def warm_ocr():
+    try:
+        blank = np.zeros((32, 32, 3), dtype=np.uint8)
+        pytesseract.image_to_data(blank, output_type=Output.DICT, timeout=3)
+    except Exception:
+        return
+
+
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "5001"))
+    warm_ocr()
     app.run(host="0.0.0.0", port=port)

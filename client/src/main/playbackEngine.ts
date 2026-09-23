@@ -103,7 +103,7 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_CONFIRM_COORD_DELTA_PX = 28;
     private static readonly SMART_CLICK_CONFIRM_MIN_CONFIDENCE = 0.55;
     private static readonly SMART_CLICK_OCR_MIN_TEXT_LEN = 2;
-    private static readonly SMART_CLICK_OCR_RESERVE_MS = 80;
+    private static readonly SMART_CLICK_OCR_RESERVE_MS = 120;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
     private smartClickAnchor: { dx: number; dy: number } | null = null;

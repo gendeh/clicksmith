@@ -1829,8 +1829,8 @@ describe('PlaybackEngine', () => {
     );
 
     expect(matchImage).toHaveBeenCalledTimes(1);
-    expect(matchImage.mock.calls[0][0].maxBudgetMs).toBe(180);
-    expect(matchImage.mock.calls[0][0].timeoutMs).toBe(180);
+    expect(matchImage.mock.calls[0][0].maxBudgetMs).toBe(140);
+    expect(matchImage.mock.calls[0][0].timeoutMs).toBe(140);
     expect(ocrImage).toHaveBeenCalledTimes(1);
     expect(result).toEqual({ x: 600, y: 230 });
     expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
@@ -1899,7 +1899,7 @@ describe('PlaybackEngine', () => {
     );
 
     const request = matchImage.mock.calls[0][0];
-    expect(request.maxBudgetMs).toBe(180);
+    expect(request.maxBudgetMs).toBe(140);
     expect(request.timeoutMs).toBeGreaterThanOrEqual(140);
     expect(ocrImage).not.toHaveBeenCalled();
     expect(result).toEqual({ x: 890, y: 170 });

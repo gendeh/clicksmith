@@ -113,3 +113,77 @@ liveMatch('a live match in a moved window clicks the patch center at 70%, 100%, 
     screenSpy.mockRestore();
   }
 });
+
+liveMatch('a live template miss still clicks the recorded word', async () => {
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  const healthy = await imageService.healthCheck(800);
+  expect(healthy).toBe(true);
+
+  const sharp = require('sharp');
+  const patch = await patternPng(96);
+  const windowPng = await sharp(
+    Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="520" height="360">
+      <rect width="520" height="360" fill="black"/>
+      <text x="48" y="140" font-size="72" font-family="Helvetica" fill="white">Submit</text>
+    </svg>`)
+  ).png().toBuffer();
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(windowPng);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(windowPng);
+  const windowOrigin = { x: 500, y: 200 };
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: {
+      getTargetBounds: () => ({ x: windowOrigin.x, y: windowOrigin.y, width: 520, height: 360 }),
+      getTargetBoundsAsync: async () => ({ x: windowOrigin.x, y: windowOrigin.y, width: 520, height: 360 }),
+    } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-ocr',
+    target: 'Terminal',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 160,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: 40,
+      y: 30,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: {
+        ocr_primary_text_normalized: 'submit',
+        ocr_anchor_norm_x: 0,
+        ocr_anchor_norm_y: 0,
+      },
+    },
+    { x: 40, y: 30 }
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  expect(status.smartClickLastMethod).toBe('ocr');
+  expect(status.smartClickLastSource).toBe('window');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(result).not.toEqual({ x: 40, y: 30 });
+  expect(result.x).toBeGreaterThanOrEqual(windowOrigin.x + 40);
+  expect(result.x).toBeLessThanOrEqual(windowOrigin.x + 320);
+  expect(result.y).toBeGreaterThanOrEqual(windowOrigin.y + 60);
+  expect(result.y).toBeLessThanOrEqual(windowOrigin.y + 180);
+  expect(elapsed).toBeLessThan(1500);
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+});
