@@ -90,6 +90,8 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_MAX_FULLSCREEN_CANDIDATES = 10;
     private static readonly SMART_CLICK_MAX_HASH_EVALS = 8;
     private static readonly SMART_CLICK_DHASH_MAX_DISTANCE = 32;
+    private static readonly SMART_CLICK_DHASH_WEAK_MAX_DISTANCE = 12;
+    private static readonly SMART_CLICK_STRONG_MATCH_CONFIDENCE = 0.85;
     private static readonly SMART_CLICK_COLLECTION_MIN_CONFIDENCE = 0.25;
     private static readonly SMART_CLICK_ADAPTIVE_COLLECTION_MIN_CONFIDENCE = 0.2;
     private static readonly SMART_CLICK_ANCHOR_MAX_ABS_OFFSET_PX = 520;
@@ -1410,7 +1412,8 @@ export class PlaybackEngine extends EventEmitter {
             }
             if (
                 candidate.scale !== undefined &&
-                Math.abs(candidate.scale - this.getSmartClickScaleBaseline()) >= PlaybackEngine.SMART_CLICK_HASH_SKIP_SCALE_DELTA
+                Math.abs(candidate.scale - this.getSmartClickScaleBaseline()) >= PlaybackEngine.SMART_CLICK_HASH_SKIP_SCALE_DELTA &&
+                candidate.confidence >= PlaybackEngine.SMART_CLICK_STRONG_MATCH_CONFIDENCE
             ) {
                 candidate.passesHashGate = true;
                 continue;
@@ -1433,6 +1436,13 @@ export class PlaybackEngine extends EventEmitter {
             (a, b) => this.compareSmartClickCandidateFinal(a, b, preferredBounds)
         );
         if (best.confidence < baseThreshold) {
+            return null;
+        }
+        if (
+            best.confidence < PlaybackEngine.SMART_CLICK_STRONG_MATCH_CONFIDENCE &&
+            typeof best.dhashDistance === 'number' &&
+            best.dhashDistance > PlaybackEngine.SMART_CLICK_DHASH_WEAK_MAX_DISTANCE
+        ) {
             return null;
         }
 
