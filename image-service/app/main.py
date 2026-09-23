@@ -86,11 +86,11 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
                 }
             )
 
-            # Suppress the local neighborhood so subsequent picks are distinct.
-            left = max(0, x - w // 2)
-            top = max(0, y - h // 2)
-            right = min(work.shape[1], x + w + w // 2)
-            bottom = min(work.shape[0], y + h + h // 2)
+            pad = max(12, max(w, h) // 2 + 4)
+            left = max(0, x - pad)
+            top = max(0, y - pad)
+            right = min(work.shape[1], x + pad + 1)
+            bottom = min(work.shape[0], y + pad + 1)
             work[top:bottom, left:right] = -1.0
     elif max_val >= accept_at:
         matches.append(

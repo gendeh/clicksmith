@@ -898,6 +898,111 @@ liveMatch('a flat screen patch at 140% clicks the scaled center', async () => {
   }
 }, 20000);
 
+liveMatch('two copies eight pixels apart click the recorded one', async () => {
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const origin = { x: 400, y: 300 };
+  const size = 640;
+  const patchSize = 40;
+  const gap = 8;
+  const raw = Buffer.alloc(size * size * 3, 18);
+  const patch = Buffer.alloc(patchSize * patchSize * 3, 0);
+  for (let y = 0; y < patchSize; y += 1) {
+    for (let x = 0; x < patchSize; x += 1) {
+      const i = (y * patchSize + x) * 3;
+      const border = x < 2 || y < 2 || x >= patchSize - 2 || y >= patchSize - 2;
+      const diag = Math.abs(x - y) < 2;
+      const blob = (x - 12) ** 2 + (y - 26) ** 2 < 36;
+      patch[i] = border ? 240 : diag ? 255 : blob ? 30 : 80 + ((x * 3) % 40);
+      patch[i + 1] = border ? 40 : blob ? 180 : 60;
+      patch[i + 2] = border ? 40 : diag ? 20 : 200;
+    }
+  }
+  const rightLeft = size / 2 - patchSize / 2;
+  const leftLeft = rightLeft - patchSize - gap;
+  const top = size / 2 - patchSize / 2;
+  const blit = (destX: number, destY: number) => {
+    for (let y = 0; y < patchSize; y += 1) {
+      for (let x = 0; x < patchSize; x += 1) {
+        const src = (y * patchSize + x) * 3;
+        const dst = ((destY + y) * size + (destX + x)) * 3;
+        raw[dst] = patch[src];
+        raw[dst + 1] = patch[src + 1];
+        raw[dst + 2] = patch[src + 2];
+      }
+    }
+  };
+  blit(leftLeft, top);
+  blit(rightLeft, top);
+  const search = await sharp(raw, { raw: { width: size, height: size, channels: 3 } }).png().toBuffer();
+  const patchPng = await sharp(patch, { raw: { width: patchSize, height: patchSize, channels: 3 } }).png().toBuffer();
+  const recordedHash = await computeDHash(patchPng);
+  const recorded = { x: origin.x + size / 2, y: origin.y + size / 2 };
+  const other = {
+    x: origin.x + leftLeft + patchSize / 2,
+    y: origin.y + top + patchSize / 2,
+  };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-nearby-copy',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patchPng.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  expect(screenSpy).not.toHaveBeenCalled();
+  const recordedError = Math.hypot(result.x - recorded.x, result.y - recorded.y);
+  const otherError = Math.hypot(result.x - other.x, result.y - other.y);
+  if (recordedError > 8 || otherError <= 8) {
+    throw new Error(
+      `click (${result.x}, ${result.y}) recorded (${recorded.x}, ${recorded.y}) other (${other.x}, ${other.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} source ${status.smartClickLastSource}`
+    );
+  }
+  expect(status.smartClickLastSource).toBe('region');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  if (elapsed >= 460) {
+    throw new Error(`nearby copy click took ${elapsed}ms at (${result.x}, ${result.y})`);
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

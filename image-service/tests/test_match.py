@@ -544,6 +544,57 @@ def test_flat_patch_at_140_percent_clicks_the_scaled_center():
     assert abs(float(data["matches"][0]["scale"]) - scale) <= 0.08
 
 
+def test_nearby_copy_stays_a_candidate():
+    app = create_app()
+    client = app.test_client()
+    template = make_template(40)
+    height, width = template.shape[:2]
+    search = np.zeros((180, 360, 3), dtype=np.uint8)
+    search[30 : 30 + height, 20 : 20 + width] = template
+    second = 20 + width + 8
+    search[30 : 30 + height, second : second + width] = template
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=1.0,
+        max_scale=1.0,
+        scale_hint=1.0,
+        find_all=True,
+        max_matches=4,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    centers = [(int(item["x"]), int(item["y"])) for item in data["matches"]]
+    first = (20 + width // 2, 30 + height // 2)
+    other = (second + width // 2, 30 + height // 2)
+    assert any(abs(x - first[0]) <= 2 and abs(y - first[1]) <= 2 for x, y in centers)
+    assert any(abs(x - other[0]) <= 2 and abs(y - other[1]) <= 2 for x, y in centers)
+
+
+def test_one_button_is_one_match():
+    app = create_app()
+    client = app.test_client()
+    template = make_template(40)
+    search = embed_scaled_template(template, 1.0, canvas_size=200, origin=(40, 50))
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.25,
+        min_scale=1.0,
+        max_scale=1.0,
+        scale_hint=1.0,
+        find_all=True,
+        max_matches=4,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert len(data["matches"]) == 1
+
+
 def test_flat_patch_at_70_percent_clicks_the_scaled_center():
     app = create_app()
     client = app.test_client()

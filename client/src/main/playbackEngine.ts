@@ -46,6 +46,7 @@ type SmartClickViableCandidate = {
     scaleRank: number;
     dhashDistance: number | null | undefined;
     anchorRank: number;
+    expectedDistance: number;
     inPreferredBounds: boolean;
     passesHashGate: boolean | undefined;
 };
@@ -1265,6 +1266,14 @@ export class PlaybackEngine extends EventEmitter {
         if (allowScaleTiebreak && Math.abs(a.confidence - b.confidence) <= 0.03 && a.scaleRank !== b.scaleRank) {
             return a.scaleRank - b.scaleRank;
         }
+        if (
+            allowScaleTiebreak &&
+            a.anchorRank === b.anchorRank &&
+            Math.abs(a.confidence - b.confidence) <= 0.05 &&
+            a.expectedDistance !== b.expectedDistance
+        ) {
+            return a.expectedDistance - b.expectedDistance;
+        }
         return b.confidence - a.confidence;
     }
 
@@ -1386,6 +1395,7 @@ export class PlaybackEngine extends EventEmitter {
                 scaleRank,
                 dhashDistance: undefined,
                 anchorRank,
+                expectedDistance: jumpFromExpected,
                 inPreferredBounds,
                 passesHashGate: undefined,
             });
