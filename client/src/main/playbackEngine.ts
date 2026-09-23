@@ -1490,9 +1490,7 @@ export class PlaybackEngine extends EventEmitter {
         const stageBudgetMs = (stage: SmartClickStage) => {
             const preferred =
                 stage === 'target_window'
-                    ? adaptationMode
-                        ? 120
-                        : (isBootstrap ? 100 : 80)
+                    ? remainingBudgetMs()
                     : stage === 'region'
                       ? adaptationMode
                           ? 70

@@ -166,6 +166,9 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
     return ordered
 
 
+DECISIVE_TEMPLATE_CONFIDENCE = 0.92
+
+
 def match_template_multiscale(
     template,
     search_area,
@@ -187,6 +190,7 @@ def match_template_multiscale(
 
     scales = build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08)
     best_scale = None
+    stopped_on_decisive = False
 
     for scale in scales:
         if (time.perf_counter() - start) * 1000 >= max_budget_ms:
@@ -216,8 +220,15 @@ def match_template_multiscale(
                 best_scale = scale
         if candidate_matches:
             collected.extend(candidate_matches)
+        if best_match and score_of(best_match) >= DECISIVE_TEMPLATE_CONFIDENCE:
+            stopped_on_decisive = True
+            break
 
-    if best_scale is not None and (time.perf_counter() - start) * 1000 < max_budget_ms:
+    if (
+        not stopped_on_decisive
+        and best_scale is not None
+        and (time.perf_counter() - start) * 1000 < max_budget_ms
+    ):
         for delta in (-0.04, -0.02, 0.02, 0.04):
             scale = round(best_scale + delta, 3)
             if scale < min_scale or scale > max_scale:

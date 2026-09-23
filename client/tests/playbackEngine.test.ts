@@ -1699,7 +1699,63 @@ describe('PlaybackEngine', () => {
     );
 
     expect(result).toEqual({ x: 890, y: 170 });
-    expect(matchImage.mock.calls[0][0].maxBudgetMs).toBe(100);
+    expect(matchImage.mock.calls[0][0].maxBudgetMs).toBe(260);
+    captureSpy.mockRestore();
+  });
+
+  test('a window match slower than 80ms still clicks the patch', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('window'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const matchImage = jest.fn().mockResolvedValue({
+      success: true,
+      matches: [match],
+      bestMatch: match,
+      processingTimeMs: 140,
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: { matchImage } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 800, y: 100, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 800, y: 100, width: 800, height: 600 }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 540,
+        y: 230,
+        rel_x: 0.05,
+        rel_y: 0.05,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+      },
+      { x: 540, y: 230 }
+    );
+
+    const request = matchImage.mock.calls[0][0];
+    expect(request.maxBudgetMs).toBeGreaterThanOrEqual(140);
+    expect(request.timeoutMs).toBeGreaterThanOrEqual(140);
+    expect(result).toEqual({ x: 890, y: 170 });
     captureSpy.mockRestore();
   });
 

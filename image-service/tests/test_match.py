@@ -170,6 +170,64 @@ def test_zoom_edges_match_inside_window_stage_budget():
         assert abs(float(data["bestMatch"]["y"]) - center_y) <= 8
 
 
+def test_decisive_match_stops_before_the_rest_of_the_scale_grid(monkeypatch):
+    calls = {"n": 0}
+    real = __import__("app.main", fromlist=["match_template"]).match_template
+
+    def wrapped(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.main.match_template", wrapped)
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(128)
+    search = embed_scaled_template(template, 1.0, canvas_size=480, origin=(40, 36))
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        method="template",
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+    )
+    data = res.get_json()
+    assert data["bestMatch"]["confidence"] >= 0.92
+    assert abs(float(data["bestMatch"]["scale"]) - 1.0) <= 0.05
+    assert calls["n"] == 1
+
+
+def test_zoomed_patch_is_found_on_its_own_scale(monkeypatch):
+    calls = {"n": 0}
+    real = __import__("app.main", fromlist=["match_template"]).match_template
+
+    def wrapped(*args, **kwargs):
+        calls["n"] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr("app.main.match_template", wrapped)
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(128)
+    search = embed_scaled_template(template, 0.7, canvas_size=480, origin=(40, 36))
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        method="template",
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+    )
+    data = res.get_json()
+    assert data["bestMatch"]["confidence"] >= 0.6
+    assert abs(float(data["bestMatch"]["scale"]) - 0.7) <= 0.15
+    assert calls["n"] <= 3
+
+
 def test_match_endpoint_in_range_scale_1_3():
     app = create_app()
     client = app.test_client()
