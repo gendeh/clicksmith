@@ -20,6 +20,7 @@ const KEYCODE_MAP: Record<number, string> = {
 
 const HOOK_CALIBRATION_MIN_SAMPLES = 8;
 const IMAGE_CONTEXT_TIMEOUT_MS = 2_500;
+const RECORDING_BOUNDS_WAIT_MS = 200;
 
 class HookTimeCalibrator {
     private baseHookTime: number | null = null;
@@ -139,7 +140,10 @@ export class RecordingEngine extends EventEmitter {
         this.hookTimeOffsetMs = 0;
         this.recordingStartHrNs = process.hrtime.bigint();
         this.hookTimeCalibrator.reset();
-        this.targetBounds = this.windowManager.getTargetBounds(config.target);
+        this.targetBounds = await this.captureRecordingBounds(config.target);
+        if (!this.isRecording) {
+            return { success: false };
+        }
         this.attachListeners();
         this.inputHook.start();
         this.emit('status', { state: 'recording' });
@@ -458,10 +462,41 @@ export class RecordingEngine extends EventEmitter {
         return mods;
     }
 
+    private async captureRecordingBounds(target: string): Promise<WindowBounds | null> {
+        const normalized = (target || '').trim().toLowerCase();
+        if (!normalized || normalized === 'screen') {
+            return this.windowManager.getTargetBounds(target);
+        }
+        const lookup = this.windowManager.getTargetBoundsAsync;
+        if (typeof lookup !== 'function') {
+            return this.windowManager.getTargetBounds(target);
+        }
+        let timer: NodeJS.Timeout | null = null;
+        try {
+            const pending = Promise.resolve(lookup.call(this.windowManager, target)).catch(() => null);
+            const bounds = await Promise.race([
+                pending,
+                new Promise<null>((resolve) => {
+                    timer = setTimeout(() => resolve(null), RECORDING_BOUNDS_WAIT_MS);
+                }),
+            ]);
+            if (!bounds) {
+                void pending.then((late) => {
+                    if (late && this.isRecording && !this.targetBounds) {
+                        this.targetBounds = late;
+                    }
+                });
+            }
+            return bounds ?? null;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
     private getRelativeCoords(x: number, y: number) {
         const bounds = this.targetBounds;
         if (!bounds || bounds.width === 0 || bounds.height === 0) {
-            return { rel_x: 0, rel_y: 0 };
+            return { rel_x: Number.NaN, rel_y: Number.NaN };
         }
         return {
             rel_x: (x - bounds.x) / bounds.width,

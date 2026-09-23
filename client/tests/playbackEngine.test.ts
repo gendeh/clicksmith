@@ -2362,4 +2362,45 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('an unknown relative point stays on the recorded absolute click', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const moves: Array<{ x: number; y: number }> = [];
+    const engine = new PlaybackEngine({
+      inputPlayer: {
+        moveMouse: (x: number, y: number) => moves.push({ x, y }),
+        mouseDown: () => undefined,
+        mouseUp: () => undefined,
+        keyDown: () => undefined,
+        keyUp: () => undefined,
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+        getTargetBoundsAsync: async () => ({ x: 800, y: 100, width: 800, height: 600 }),
+      } as any,
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      events: [
+        {
+          t_ms: 0,
+          type: 'mouse',
+          btn: 'left',
+          x: 540,
+          y: 230,
+          rel_x: Number.NaN,
+          rel_y: Number.NaN,
+          duration_ms: 0,
+          human_override: false,
+        },
+      ],
+    };
+
+    await engine.start({ ...config, target: 'Terminal', useRelativeCoords: true, useImageMatching: false }, profile);
+    await jest.advanceTimersByTimeAsync(50);
+
+    expect(moves[0]).toEqual({ x: 540, y: 230 });
+    jest.useRealTimers();
+  });
 });

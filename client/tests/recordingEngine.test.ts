@@ -178,4 +178,43 @@ describe('RecordingEngine', () => {
       ocr_primary_text_normalized: 'save',
     }));
   });
+
+  test('records the click against the live window when sync bounds are the desktop', async () => {
+    const hook = new MockInputHook();
+    const recorder = new RecordingEngine({
+      inputHook: hook,
+      windowManager: {
+        getTargetBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+        getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+      } as any,
+    });
+
+    await recorder.start(mockConfig);
+    hook.emit('mousedown', { x: 540, y: 230, button: 1 });
+    const result = await recorder.stop();
+
+    expect(result.profile.events[0].rel_x).toBeCloseTo(0.05);
+    expect(result.profile.events[0].rel_y).toBeCloseTo(0.05);
+  });
+
+  test('a missing window does not record the click as the window origin', async () => {
+    const hook = new MockInputHook();
+    const recorder = new RecordingEngine({
+      inputHook: hook,
+      windowManager: {
+        getTargetBounds: () => ({ x: 0, y: 0, width: 1920, height: 1080 }),
+        getTargetBoundsAsync: async () => null,
+      } as any,
+    });
+
+    await recorder.start(mockConfig);
+    hook.emit('mousedown', { x: 540, y: 230, button: 1 });
+    const result = await recorder.stop();
+    const event = result.profile.events[0];
+
+    expect(Number.isFinite(event.rel_x)).toBe(false);
+    expect(Number.isFinite(event.rel_y)).toBe(false);
+    expect(event.x).toBe(540);
+    expect(event.y).toBe(230);
+  });
 });

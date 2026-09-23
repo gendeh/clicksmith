@@ -488,6 +488,9 @@ export class PlaybackEngine extends EventEmitter {
         if (refreshedBounds) {
             this.targetBounds = refreshedBounds;
         }
+        if (!Number.isFinite(event.rel_x) || !Number.isFinite(event.rel_y)) {
+            return { x: event.x, y: event.y };
+        }
         return {
             x: Math.round(this.targetBounds.x + this.targetBounds.width * event.rel_x),
             y: Math.round(this.targetBounds.y + this.targetBounds.height * event.rel_y),
