@@ -20,6 +20,7 @@ import { runAutoTune } from './autoTune';
 import { WindowManager } from './windowManager';
 import { hotkeyTarget } from './hotkeyTarget';
 import { ImageService } from '../services/imageService';
+import { playbackConfigFromPreferences, recordingConfigFromPreferences } from '../services/sessionConfig';
 import { syncProfileDeleteToCloud, syncProfileToCloud } from './cloudSync';
 import { ModManager } from './modManager';
 import { createDefaultInputHook, HookEvent, HookMouseEvent, InputHook } from './inputHooks';
@@ -198,38 +199,11 @@ function createOverlayWindow() {
 }
 
 function buildRecordingConfig(config: Partial<RecordingConfig>): RecordingConfig {
-  const preferences = settingsStore.getPreferences();
-  return {
-    target: config.target ?? 'screen',
-    captureImages: config.captureImages ?? preferences.defaultRecordingConfig.captureImages ?? true,
-    imagePatchSize: config.imagePatchSize ?? preferences.defaultRecordingConfig.imagePatchSize ?? 128,
-    minEventInterval: config.minEventInterval ?? preferences.defaultRecordingConfig.minEventInterval ?? 8,
-    recordKeyboard: config.recordKeyboard ?? preferences.defaultRecordingConfig.recordKeyboard ?? true,
-    recordMouse: config.recordMouse ?? preferences.defaultRecordingConfig.recordMouse ?? true,
-    stopHotkey: config.stopHotkey ?? preferences.hotkeys.toggleRecording,
-    takeoverHotkey: config.takeoverHotkey ?? preferences.hotkeys.takeover,
-  };
+  return recordingConfigFromPreferences(config, settingsStore.getPreferences());
 }
 
 function buildPlaybackConfig(config: Partial<PlaybackConfig>): PlaybackConfig {
-  const preferences = settingsStore.getPreferences();
-  return {
-    profileId: config.profileId ?? '',
-    target: config.target ?? 'screen',
-    useImageMatching: config.useImageMatching ?? preferences.defaultPlaybackConfig.useImageMatching ?? true,
-    imageMatchThreshold:
-      config.imageMatchThreshold ?? preferences.defaultPlaybackConfig.imageMatchThreshold ?? 0.6,
-    timingTolerance: config.timingTolerance ?? preferences.defaultPlaybackConfig.timingTolerance ?? 20,
-    retryCount: config.retryCount ?? preferences.defaultPlaybackConfig.retryCount ?? 2,
-    retryDelay: config.retryDelay ?? preferences.defaultPlaybackConfig.retryDelay ?? 80,
-    takeoverHotkey: config.takeoverHotkey ?? preferences.hotkeys.takeover,
-    speedMultiplier: config.speedMultiplier ?? preferences.defaultPlaybackConfig.speedMultiplier ?? 1,
-    useRelativeCoords: config.useRelativeCoords ?? preferences.defaultPlaybackConfig.useRelativeCoords ?? true,
-    imageSearchRadius: config.imageSearchRadius ?? preferences.defaultPlaybackConfig.imageSearchRadius ?? 160,
-    snapToHz: config.snapToHz ?? preferences.defaultPlaybackConfig.snapToHz ?? 240,
-    snapMode: config.snapMode ?? preferences.defaultPlaybackConfig.snapMode ?? 'duration-lock',
-    snapPhaseMs: config.snapPhaseMs ?? preferences.defaultPlaybackConfig.snapPhaseMs ?? 0,
-  };
+  return playbackConfigFromPreferences(config, settingsStore.getPreferences());
 }
 
 function buildSuccessMetric(): SuccessMetric {

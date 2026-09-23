@@ -3033,4 +3033,59 @@ describe('PlaybackEngine', () => {
     screenSpy.mockRestore();
     jest.useRealTimers();
   });
+
+  test('snap off keeps a desktop click on its recorded millisecond', async () => {
+    const pending = new Map<number, number>();
+    let id = 0;
+    const clock = {
+      now: () => 5000,
+      setTimeout: (_handler: () => void, timeout: number) => {
+        id += 1;
+        pending.set(id, timeout);
+        return id as unknown as NodeJS.Timeout;
+      },
+      clearTimeout: (handle: NodeJS.Timeout) => {
+        pending.delete(handle as unknown as number);
+      },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {
+        moveMouse() {},
+        mouseDown() {},
+        mouseUp() {},
+        keyDown() {},
+        keyUp() {},
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }),
+        getTargetBoundsAsync: async () => null,
+      } as any,
+      clock,
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      events: [
+        {
+          t_ms: 10,
+          type: 'mouse',
+          btn: 'left',
+          x: 10,
+          y: 20,
+          rel_x: 0.1,
+          rel_y: 0.2,
+          duration_ms: 0,
+          human_override: false,
+        },
+      ],
+    };
+
+    await engine.start({ ...config, snapToHz: 0, snapMode: 'duration-lock' }, profile);
+    expect([...pending.values()]).toEqual([8]);
+
+    await engine.stop();
+    await engine.start({ ...config, snapToHz: 240, snapMode: 'duration-lock' }, profile);
+    const snapped = [...pending.values()];
+    expect(snapped).toHaveLength(1);
+    expect(snapped[0]).toBeCloseTo(2000 / 240 - 2, 5);
+  });
 });
