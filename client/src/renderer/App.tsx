@@ -10,6 +10,7 @@ import {
   WindowInfo,
 } from '../types';
 import { formatSmartClickStatsLine } from '../services/smartClickStats';
+import { desktopAutomationPreferences } from '../services/desktopAutomation';
 
 type DraftProfile = {
   target_app: string;
@@ -344,6 +345,13 @@ const App: React.FC = () => {
           snapPhaseMs: clamped,
         },
       })
+      .then((updated: UserPreferences) => setPreferences(updated));
+  };
+
+  const applyDesktopAutomation = () => {
+    if (!preferences) return;
+    ipc
+      .invoke(IPC_CHANNELS.SETTINGS_SET, desktopAutomationPreferences(preferences))
       .then((updated: UserPreferences) => setPreferences(updated));
   };
 
@@ -809,6 +817,16 @@ const App: React.FC = () => {
                 onChange={event => handleImageSearchRadiusChange(event.target.value)}
               />
             </div>
+
+            <button
+              type="button"
+              className="btn btn-ghost"
+              data-testid="btn-desktop-automation"
+              onClick={applyDesktopAutomation}
+              disabled={!preferences}
+            >
+              Desktop Automation
+            </button>
 
             <div className="profile-meta" data-testid="smartclick-stats">
               {formatSmartClickStatsLine(playbackStatus)}
