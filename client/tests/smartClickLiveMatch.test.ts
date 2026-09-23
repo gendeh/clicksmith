@@ -489,6 +489,79 @@ liveMatch('a screen target clicks a patch that moved inside the search radius', 
   }
 }, 20000);
 
+liveMatch('a flat patch that is not on screen is not the click', async () => {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const origin = { x: 400, y: 300 };
+  const size = 640;
+  const file = path.join(os.tmpdir(), `sc-flat-miss-${process.pid}.png`);
+  const arg = `${origin.x},${origin.y},${size},${size}`;
+  await new Promise<void>((resolve, reject) => {
+    execFile('screencapture', ['-x', '-R', arg, file], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  const native = await fs.promises.readFile(file);
+  await fs.promises.unlink(file).catch(() => undefined);
+  const logical = await sharp(native).resize(size, size, { fit: 'fill' }).png().toBuffer();
+  const patch = await sharp({
+    create: { width: 96, height: 96, channels: 3, background: { r: 255, g: 0, b: 255 } },
+  }).png().toBuffer();
+  const recordedHash = await computeDHash(patch);
+  const recorded = { x: origin.x + size / 2, y: origin.y + size / 2 };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(logical);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(logical);
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-flat-miss',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  expect(result).toEqual(recorded);
+  expect(status.smartClickLastSource).toBe('expected_fallback');
+  expect(status.successfulMatches).toBe(0);
+  expect(status.smartClickLastConfidence).toBeUndefined();
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');
