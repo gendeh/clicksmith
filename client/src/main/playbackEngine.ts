@@ -103,6 +103,7 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_CONFIRM_COORD_DELTA_PX = 28;
     private static readonly SMART_CLICK_CONFIRM_MIN_CONFIDENCE = 0.55;
     private static readonly SMART_CLICK_OCR_MIN_TEXT_LEN = 2;
+    private static readonly SMART_CLICK_OCR_RESERVE_MS = 80;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
     private smartClickAnchor: { dx: number; dy: number } | null = null;
@@ -771,6 +772,17 @@ export class PlaybackEngine extends EventEmitter {
         return overlap / Math.max(aTokens.size, bTokens.size);
     }
 
+    private recordedOcrQuery(event: RecordedEvent): string {
+        const metadata = event.metadata as Record<string, unknown> | undefined;
+        if (typeof metadata?.ocr_primary_text_normalized === 'string') {
+            return metadata.ocr_primary_text_normalized;
+        }
+        if (typeof metadata?.ocr_primary_text === 'string') {
+            return this.normalizeOcrText(metadata.ocr_primary_text);
+        }
+        return '';
+    }
+
     private async tryOcrSmartClickFallback(
         event: RecordedEvent,
         stageRegion: WindowBounds,
@@ -779,11 +791,7 @@ export class PlaybackEngine extends EventEmitter {
         timeoutMs: number
     ): Promise<SmartClickCandidateSelection | null> {
         const metadata = event.metadata as Record<string, unknown> | undefined;
-        const rawText = typeof metadata?.ocr_primary_text_normalized === 'string'
-            ? metadata.ocr_primary_text_normalized
-            : typeof metadata?.ocr_primary_text === 'string'
-                ? this.normalizeOcrText(metadata.ocr_primary_text)
-                : '';
+        const rawText = this.recordedOcrQuery(event);
         if (!rawText || rawText.length < PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN) {
             return null;
         }
@@ -1531,7 +1539,12 @@ export class PlaybackEngine extends EventEmitter {
                       : Math.min(160, remainingBudgetMs());
             return Math.max(20, Math.min(preferred, remainingBudgetMs()));
         };
-        const stageTimeoutMs = (stage: SmartClickStage) => Math.max(20, Math.min(requestTimeoutMs, stageBudgetMs(stage)));
+        const ocrReserveMs =
+            this.recordedOcrQuery(event).length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN
+                ? PlaybackEngine.SMART_CLICK_OCR_RESERVE_MS
+                : 0;
+        const imageBudgetLeftMs = () => Math.max(0, budgetLeftMs() - ocrReserveMs);
+        const imageStageOpen = () => !timedOut() && imageBudgetLeftMs() >= 20;
         const relativeFallback = this.relativeFallbackPoint(event, preferredBounds);
         const anchorBase = relativeFallback ?? expected;
         const anchored = this.applySmartClickAnchor(anchorBase);
@@ -1555,7 +1568,7 @@ export class PlaybackEngine extends EventEmitter {
         });
 
         try {
-            if (preferredBounds && !timedOut()) {
+            if (preferredBounds && imageStageOpen()) {
                 const targetRegion = {
                     x: Math.max(desktopBounds.x, preferredBounds.x),
                     y: Math.max(desktopBounds.y, preferredBounds.y),
@@ -1563,7 +1576,8 @@ export class PlaybackEngine extends EventEmitter {
                     height: Math.max(1, Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) - Math.max(desktopBounds.y, preferredBounds.y)),
                 };
                 const targetArea = await captureForMatch(() => captureRegion(targetRegion));
-                const targetBudget = stageBudgetMs('target_window');
+                const targetBudget = Math.min(stageBudgetMs('target_window'), imageBudgetLeftMs());
+                const targetTimeoutMs = Math.max(20, Math.min(requestTimeoutMs, targetBudget));
                 const targetResponse = await this.imageService.matchImage({
                     template: templateForMatch,
                     templateHash,
@@ -1572,7 +1586,7 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'hybrid',
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
-                    timeoutMs: stageTimeoutMs('target_window'),
+                    timeoutMs: targetTimeoutMs,
                     minScale: scaleWindow.minScale,
                     maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
@@ -1635,7 +1649,7 @@ export class PlaybackEngine extends EventEmitter {
                               preferredBounds,
                               adaptationMode,
                               fullscreenThreshold,
-                              stageTimeoutMs('target_window'),
+                              targetTimeoutMs,
                               targetBudget
                           )
                         : true;
@@ -1674,7 +1688,7 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (!timedOut()) {
+            if (imageStageOpen()) {
                 const searchCenter = fallbackCoords;
                 const rawRegion = {
                     x: searchCenter.x - searchRadius,
@@ -1689,7 +1703,7 @@ export class PlaybackEngine extends EventEmitter {
                     height: Math.max(1, Math.min(desktopBottom, rawRegion.y + rawRegion.height) - Math.max(desktopBounds.y, rawRegion.y)),
                 };
                 const searchArea = await captureForMatch(() => captureRegion(region));
-                const regionBudget = stageBudgetMs('region');
+                const regionBudget = Math.min(stageBudgetMs('region'), imageBudgetLeftMs());
                 const regionResponse = await this.imageService.matchImage({
                     template: templateForMatch,
                     templateHash,
@@ -1698,7 +1712,7 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'hybrid',
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_REGION_CANDIDATES,
-                    timeoutMs: stageTimeoutMs('region'),
+                    timeoutMs: Math.max(20, Math.min(requestTimeoutMs, regionBudget)),
                     minScale: scaleWindow.minScale,
                     maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
@@ -1782,7 +1796,7 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (!timedOut() && preferredBounds && event.img_context_b64) {
+            if (imageStageOpen() && preferredBounds && event.img_context_b64) {
                 const contextRegion = {
                     x: Math.max(desktopBounds.x, preferredBounds.x),
                     y: Math.max(desktopBounds.y, preferredBounds.y),
@@ -1798,7 +1812,7 @@ export class PlaybackEngine extends EventEmitter {
                     ),
                 };
                 const contextArea = await captureForMatch(() => captureRegion(contextRegion));
-                const contextBudget = Math.min(budgetLeftMs(), adaptationMode ? 140 : 100);
+                const contextBudget = Math.min(imageBudgetLeftMs(), adaptationMode ? 140 : 100);
                 const contextResponse = await this.imageService.matchImage({
                     template: event.img_context_b64,
                     templateHash: typeof event.metadata?.img_context_hash === 'string' ? event.metadata.img_context_hash : undefined,
@@ -1928,9 +1942,10 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (!timedOut()) {
+            if (imageStageOpen()) {
                 const fullScreen = await captureForMatch(() => captureScreen());
-                const fullscreenBudget = stageBudgetMs('fullscreen');
+                const fullscreenBudget = Math.min(stageBudgetMs('fullscreen'), imageBudgetLeftMs());
+                const fullscreenTimeoutMs = Math.max(20, Math.min(requestTimeoutMs, fullscreenBudget));
                 const fullResponse = await this.imageService.matchImage({
                     template: templateForMatch,
                     templateHash,
@@ -1939,7 +1954,7 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'hybrid',
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_FULLSCREEN_CANDIDATES,
-                    timeoutMs: stageTimeoutMs('fullscreen'),
+                    timeoutMs: fullscreenTimeoutMs,
                     minScale: scaleWindow.minScale,
                     maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
@@ -2008,7 +2023,7 @@ export class PlaybackEngine extends EventEmitter {
                               preferredBounds,
                               adaptationMode,
                               fullscreenThreshold,
-                              stageTimeoutMs('fullscreen'),
+                              fullscreenTimeoutMs,
                               fullscreenBudget
                           )
                         : true;
