@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { ImageMatchRequest, ImageMatchResponse, ImageOcrRequest, ImageOcrResponse } from '../types';
+import { fitMatchRequest, fitOcrImage, scaleMatchResponse, scaleOcrResponse } from './matchImageFit';
 
 type CachedMatch = {
   expiresAt: number;
@@ -37,14 +38,22 @@ export class ImageService {
   }
 
   public async matchImage(request: ImageMatchRequest): Promise<ImageMatchResponse> {
-    const key = this.makeCacheKey(request);
+    const started = Date.now();
+    const fitted = await fitMatchRequest(request);
+    const elapsed = Date.now() - started;
+    const fittedRequest: ImageMatchRequest = {
+      ...fitted.request,
+      timeoutMs:
+        request.timeoutMs === undefined ? request.timeoutMs : Math.max(0, request.timeoutMs - elapsed),
+    };
+    const key = this.makeCacheKey(fittedRequest);
     const now = Date.now();
     const cached = key ? this.cache.get(key) : undefined;
     if (cached && cached.expiresAt > now) {
       return cached.response;
     }
 
-    const payload = await this.requestMatch(request);
+    const payload = scaleMatchResponse(await this.requestMatch(fittedRequest), fitted.coordinateScale);
     if (key && payload.success && payload.bestMatch) {
       this.cache.set(key, {
         response: payload,
@@ -74,14 +83,19 @@ export class ImageService {
   }
 
   public async ocrImage(request: ImageOcrRequest): Promise<ImageOcrResponse> {
-    const timeoutMs = Math.max(0, Math.min(3000, request.timeoutMs ?? 900));
+    const started = Date.now();
+    const fitted = await fitOcrImage(request.image);
+    const elapsed = Date.now() - started;
+    const budget = Math.max(0, Math.min(3000, request.timeoutMs ?? 900));
+    const timeoutMs = Math.max(0, budget - elapsed);
+    const fittedRequest: ImageOcrRequest = { ...request, image: fitted.image, timeoutMs };
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await fetch(`${this.endpoint}/ocr`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(request),
+        body: JSON.stringify(fittedRequest),
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -93,7 +107,7 @@ export class ImageService {
         };
       }
       const payload = (await response.json()) as ImageOcrResponse;
-      return payload;
+      return scaleOcrResponse(payload, fitted.coordinateScale);
     } catch (error) {
       return {
         success: false,
