@@ -270,3 +270,89 @@ liveMatch('a recorded word is what playback clicks after the window moves', asyn
   captureSpy.mockRestore();
   screenSpy.mockRestore();
 });
+
+liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const file = path.join(os.tmpdir(), `sc-live-fit-${process.pid}.png`);
+  await new Promise<void>((resolve, reject) => {
+    execFile('screencapture', ['-x', '-R', '20,20,1400,900', file], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  const search = await fs.promises.readFile(file);
+  await fs.promises.unlink(file).catch(() => undefined);
+  const meta = await sharp(search).metadata();
+  const width = meta.width ?? 0;
+  const height = meta.height ?? 0;
+  expect(search.length).toBeGreaterThan(900_000);
+  expect(width * height).toBeGreaterThan(4_000_000);
+
+  const probe = await sharp(search).extract({ left: 80, top: 80, width: 64, height: 64 }).png().toBuffer();
+  const raw = await fetch('http://127.0.0.1:5001/match', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      template: probe.toString('base64'),
+      searchArea: search.toString('base64'),
+      threshold: 0.6,
+      method: 'template',
+      findAll: false,
+      maxMatches: 1,
+      minScale: 1,
+      maxScale: 1,
+      maxBudgetMs: 200,
+    }),
+  });
+  expect(raw.ok).toBe(false);
+
+  const hits: string[] = [];
+  const misses: string[] = [];
+  const origins: Array<[number, number]> = [
+    [80, 80],
+    [400, 180],
+    [900, 400],
+    [200, 700],
+    [1400, 240],
+    [1100, 860],
+  ];
+  for (const [left, top] of origins) {
+    if (left + 96 > width || top + 96 > height) continue;
+    const patch = await sharp(search).extract({ left, top, width: 96, height: 96 }).png().toBuffer();
+    const result = await imageService.matchImage({
+      template: patch.toString('base64'),
+      searchArea: search.toString('base64'),
+      threshold: 0.6,
+      method: 'template',
+      findAll: true,
+      maxMatches: 4,
+      minScale: 0.7,
+      maxScale: 1.4,
+      scaleHint: 1,
+      maxBudgetMs: 400,
+      timeoutMs: 2000,
+    });
+    const match = result.bestMatch;
+    if (!match) {
+      misses.push(`${left},${top} none ${result.error ?? ''}`);
+      continue;
+    }
+    const dx = match.x - (left + 48);
+    const dy = match.y - (top + 48);
+    const line = `${left},${top} dx ${dx.toFixed(1)} dy ${dy.toFixed(1)} conf ${match.confidence.toFixed(3)}`;
+    if (match.confidence > 0.6 && Math.hypot(dx, dy) <= 8) hits.push(line);
+    else misses.push(line);
+  }
+
+  if (hits.length === 0) {
+    throw new Error(misses.join('; ') || 'no tiles were matched');
+  }
+  expect(hits.length).toBeGreaterThan(0);
+}, 30000);
