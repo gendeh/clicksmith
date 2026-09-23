@@ -21,7 +21,7 @@ export class WindowManager {
     private nativeLoadAttempted = false;
     private readonly execAsync = promisify(exec);
     private readonly targetBoundsCache = new Map<string, { bounds: WindowBounds; ts: number }>();
-    private readonly targetBoundsInflight = new Map<string, Promise<WindowBounds>>();
+    private readonly targetBoundsInflight = new Map<string, Promise<WindowBounds | null>>();
     private readonly appLabelMap: Array<{ pattern: RegExp; label: string }> = [
         { pattern: /google chrome|chrome/i, label: 'Google Chrome' },
         { pattern: /brave/i, label: 'Brave' },
@@ -245,7 +245,7 @@ export class WindowManager {
         return null;
     }
 
-    public async getTargetBoundsAsync(target: string): Promise<WindowBounds> {
+    public async getTargetBoundsAsync(target: string): Promise<WindowBounds | null> {
         const normalizedTarget = (target || '').trim().toLowerCase();
         if (!normalizedTarget || normalizedTarget === 'screen') {
             return this.getFallbackWindowInfo().bounds;
@@ -267,9 +267,7 @@ export class WindowManager {
                     this.cacheTargetBounds(normalizedTarget, macBounds);
                     return macBounds;
                 }
-                const cached = this.getCachedTargetBounds(normalizedTarget);
-                if (cached) return cached;
-                return this.getFallbackWindowInfo().bounds;
+                return null;
             } finally {
                 this.targetBoundsInflight.delete(normalizedTarget);
             }
