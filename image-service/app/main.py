@@ -231,6 +231,8 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
         preferred.extend([1.1, 0.9, 1.2, 0.67, 0.8, 1.25, 0.75, 1.33, 1.5, 1.67, 2.0])
     elif scale_hint < 1.0:
         preferred.insert(2, 0.67)
+    elif scale_hint > 1.0:
+        preferred.append(1.2)
 
     ordered = []
     seen = set()

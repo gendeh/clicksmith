@@ -1730,6 +1730,218 @@ liveMatch('a re-rendered 70% button clicks its center', async () => {
   }
 }, 20000);
 
+liveMatch('a second re-rendered 120% click still hits the center', async () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const serviceDir = '/Users/Shared/OpenClaw_Shared/Git/clicksmith-smartclick-c741/image-service';
+  const python = '/Users/Shared/OpenClaw_Shared/Git/clicksmith/image-service/.venv/bin/python';
+  const raw = execFileSync(
+    python,
+    [
+      '-c',
+      [
+        'import json, os, sys',
+        'import numpy as np',
+        `sys.path.insert(0, ${JSON.stringify(serviceDir)})`,
+        `os.chdir(${JSON.stringify(serviceDir)})`,
+        'from tests.test_match import redraw_text_button, to_base64',
+        'template = redraw_text_button(1.0)',
+        'button = redraw_text_button(1.2)',
+        'origin = (40, 50)',
+        'search = np.full((640, 640, 3), 245, dtype=np.uint8)',
+        'height, width = button.shape[:2]',
+        'search[origin[1]:origin[1] + height, origin[0]:origin[0] + width] = button',
+        'print(json.dumps({"template": to_base64(template), "search": to_base64(search), "cx": origin[0] + width / 2.0, "cy": origin[1] + height / 2.0}))',
+      ].join('\n'),
+    ],
+    { encoding: 'utf8' }
+  );
+  const fixture = JSON.parse(raw) as { template: string; search: string; cx: number; cy: number };
+  const patch = Buffer.from(fixture.template, 'base64');
+  const search = Buffer.from(fixture.search, 'base64');
+  const recordedHash = await computeDHash(patch);
+  const recorded = { x: 480, y: 400 };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-button-1.2-again',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const event = {
+    t_ms: 0,
+    type: 'mouse',
+    btn: 'left',
+    x: recorded.x,
+    y: recorded.y,
+    rel_x: 0,
+    rel_y: 0,
+    duration_ms: 0,
+    human_override: false,
+    img_patch_b64: patch.toString('base64'),
+    metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+  };
+  for (const label of ['first', 'second']) {
+    const callsBefore = captureSpy.mock.calls.length;
+    const started = Date.now();
+    const result = await engine.resolveSmartClick(event, recorded);
+    const elapsed = Date.now() - started;
+    const status = engine.getStatus();
+    const region = captureSpy.mock.calls[callsBefore]?.[0] as { x: number; y: number; width: number; height: number };
+    const visual = { x: region.x + fixture.cx, y: region.y + fixture.cy };
+    if (
+      screenSpy.mock.calls.length !== 0 ||
+      Math.abs(result.x - visual.x) > 8 ||
+      Math.abs(result.y - visual.y) > 8 ||
+      elapsed >= 460
+    ) {
+      throw new Error(
+        `${label} 120% click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} scale ${status.smartClickLastScale} source ${status.smartClickLastSource} dHash ${status.smartClickLastDHashDistance} elapsed ${elapsed}`
+      );
+    }
+    expect(status.smartClickLastSource).toBe('region');
+    expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+    expect(status.smartClickLastScale).toBeGreaterThanOrEqual(1.2 - 0.08);
+    expect(status.smartClickLastScale).toBeLessThanOrEqual(1.2 + 0.08);
+  }
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+}, 20000);
+
+liveMatch('after scroll, Coral clicks its new center', async () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const serviceDir = '/Users/Shared/OpenClaw_Shared/Git/clicksmith-smartclick-c741/image-service';
+  const python = '/Users/Shared/OpenClaw_Shared/Git/clicksmith/image-service/.venv/bin/python';
+  const raw = execFileSync(
+    python,
+    [
+      '-c',
+      [
+        'import json, os, sys',
+        'import cv2, numpy as np',
+        `sys.path.insert(0, ${JSON.stringify(serviceDir)})`,
+        `os.chdir(${JSON.stringify(serviceDir)})`,
+        'from tests.test_match import to_base64',
+        'def button(scale, label, fill):',
+        '    width = max(2, int(220 * scale))',
+        '    height = max(2, int(48 * scale))',
+        '    image = np.full((height, width, 3), fill, dtype=np.uint8)',
+        '    cv2.rectangle(image, (1, 1), (width - 2, height - 2), (17, 24, 39), 2)',
+        '    cv2.putText(image, label, (8, max(12, int(32 * scale))), cv2.FONT_HERSHEY_SIMPLEX, max(0.3, 0.7 * scale), (20, 20, 20), max(1, int(2 * scale)), cv2.LINE_AA)',
+        '    return image',
+        'fills = {"A": ((199, 243, 254), "Target A: Sunflower"), "B": ((229, 250, 209), "Target B: Mint"), "C": ((254, 234, 219), "Target C: Ocean"), "D": ((226, 226, 254), "Target D: Coral")}',
+        'spots = {"A": (40, 110), "B": (280, 110), "C": (520, 110), "D": (40, 280)}',
+        'shift = 90',
+        'search = np.full((600, 800, 3), 245, dtype=np.uint8)',
+        'recorded = button(1.0, fills["D"][1], fills["D"][0])',
+        'sample = button(0.7, fills["D"][1], fills["D"][0])',
+        'h, w = sample.shape[:2]',
+        'centers = {}',
+        'for key, (x, y) in spots.items():',
+        '    img = button(0.7, fills[key][1], fills[key][0])',
+        '    ny = y - shift',
+        '    if ny >= 0:',
+        '        search[ny:ny + h, x:x + w] = img',
+        '    centers[key] = [x + w / 2.0, ny + h / 2.0]',
+        'print(json.dumps({"template": to_base64(recorded), "search": to_base64(search), "centers": centers, "recorded": [spots["D"][0] + w / 2.0, spots["D"][1] + h / 2.0]}))',
+      ].join('\n'),
+    ],
+    { encoding: 'utf8' }
+  );
+  const fixture = JSON.parse(raw) as {
+    template: string;
+    search: string;
+    centers: Record<string, [number, number]>;
+    recorded: [number, number];
+  };
+  const patch = Buffer.from(fixture.template, 'base64');
+  const search = Buffer.from(fixture.search, 'base64');
+  const recordedHash = await computeDHash(patch);
+  const windowOrigin = { x: 120, y: 80 };
+  const recorded = {
+    x: Math.round(windowOrigin.x + fixture.recorded[0]),
+    y: Math.round(windowOrigin.y + fixture.recorded[1]),
+  };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: {
+      getTargetBounds: () => ({ ...windowOrigin, width: 800, height: 600 }),
+      getTargetBoundsAsync: async () => ({ ...windowOrigin, width: 800, height: 600 }),
+    } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-scroll-coral',
+    target: 'Terminal',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: true,
+    imageSearchRadius: 160,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: fixture.recorded[0] / 800,
+      rel_y: fixture.recorded[1] / 600,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  const visual = {
+    x: windowOrigin.x + fixture.centers.D[0],
+    y: windowOrigin.y + fixture.centers.D[1],
+  };
+  if (Math.abs(result.x - visual.x) > 8 || Math.abs(result.y - visual.y) > 8 || elapsed >= 460) {
+    throw new Error(
+      `scrolled coral (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) recorded (${recorded.x}, ${recorded.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} scale ${status.smartClickLastScale} source ${status.smartClickLastSource} dHash ${status.smartClickLastDHashDistance} elapsed ${elapsed}`
+    );
+  }
+  expect(status.smartClickLastSource).toBe('window');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(Math.abs(result.y - (windowOrigin.y + fixture.centers.A[1])) > 8).toBe(true);
+}, 20000);
+
 liveMatch('a re-rendered Sunflower among similar buttons clicks Sunflower', async () => {
   const { execFileSync } = require('child_process') as typeof import('child_process');
   const imageService = new ImageService('http://127.0.0.1:5001');
