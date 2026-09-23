@@ -1759,6 +1759,71 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
   });
 
+  test('capturing the window does not spend the match budget', async () => {
+    let now = 5_000;
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockImplementation(async () => {
+      now += 200;
+      return Buffer.from('window');
+    });
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const matchImage = jest.fn().mockResolvedValue({
+      success: true,
+      matches: [match],
+      bestMatch: match,
+      processingTimeMs: 20,
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: { matchImage } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 800, y: 100, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 800, y: 100, width: 800, height: 600 }),
+      } as any,
+      clock: {
+        now: () => now,
+        setTimeout: (handler, timeout) => setTimeout(handler, timeout),
+        clearTimeout: (handle) => clearTimeout(handle),
+      },
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 540,
+        y: 230,
+        rel_x: 0.05,
+        rel_y: 0.05,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+      },
+      { x: 540, y: 230 }
+    );
+
+    const request = matchImage.mock.calls[0][0];
+    expect(request.maxBudgetMs).toBeGreaterThanOrEqual(140);
+    expect(request.timeoutMs).toBeGreaterThanOrEqual(140);
+    expect(result).toEqual({ x: 890, y: 170 });
+    captureSpy.mockRestore();
+  });
+
   test('a missed image match clicks the relative point in the live window', async () => {
     const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
     const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));

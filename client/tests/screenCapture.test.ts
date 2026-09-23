@@ -1,5 +1,7 @@
 import { capturePatch } from '../src/main/screenCapture';
 
+const mockCaptureArgs: string[][] = [];
+
 jest.mock('electron', () => ({
   systemPreferences: {
     getMediaAccessStatus: () => 'granted',
@@ -14,6 +16,32 @@ jest.mock('electron', () => ({
       scaleFactor: 1,
     }),
     on: () => undefined,
+  },
+}));
+
+jest.mock('child_process', () => ({
+  execFile: (command: string, args: string[], callback: (error: Error | null) => void) => {
+    mockCaptureArgs.push([command, ...args]);
+    const rect = String(args[args.indexOf('-R') + 1] || '0,0,1,1');
+    const [originX, originY, width, height] = rect.split(',').map((value) => Number(value));
+    const sharp = require('sharp');
+    const raw = Buffer.alloc(width * height * 3, 0);
+    const pixelX = 10 - originX;
+    const pixelY = 10 - originY;
+    if (pixelX >= 0 && pixelY >= 0 && pixelX < width && pixelY < height) {
+      const index = (pixelY * width + pixelX) * 3;
+      raw[index] = 10;
+      raw[index + 1] = 220;
+      raw[index + 2] = 30;
+    }
+    sharp(raw, { raw: { width, height, channels: 3 } })
+      .png()
+      .toBuffer()
+      .then((png: Buffer) => {
+        require('fs').writeFileSync(args[args.length - 1], png);
+        callback(null);
+      })
+      .catch((error: Error) => callback(error));
   },
 }));
 
@@ -47,4 +75,5 @@ test('a patch clipped by the screen edge keeps the click at its center', async (
   expect(data[corner]).toBe(0);
   expect(data[corner + 1]).toBe(0);
   expect(data[corner + 2]).toBe(0);
+  expect(mockCaptureArgs[0]).toEqual(['screencapture', '-x', '-R', '0,0,30,30', expect.any(String)]);
 });

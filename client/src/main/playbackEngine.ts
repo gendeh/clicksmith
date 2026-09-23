@@ -1463,8 +1463,18 @@ export class PlaybackEngine extends EventEmitter {
         }
         const preferredBounds = this.smartClickAttemptBounds;
         expected = this.relativeFallbackPoint(event, preferredBounds) ?? expected;
-        const budgetDeadline = deadline ?? this.clock.now() + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
-        const startedAt = budgetDeadline - PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
+        let budgetDeadline = deadline ?? this.clock.now() + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
+        let startedAt = budgetDeadline - PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
+        const captureForMatch = async <T>(work: () => Promise<T>): Promise<T> => {
+            const captureStarted = this.clock.now();
+            try {
+                return await work();
+            } finally {
+                const captureMs = Math.max(0, this.clock.now() - captureStarted);
+                budgetDeadline += captureMs;
+                startedAt += captureMs;
+            }
+        };
         if (preferredBounds) {
             if (this.hasSignificantTargetBoundsChange(preferredBounds)) {
                 this.enterSmartClickAdaptationMode(undefined, 'bounds_change');
@@ -1529,7 +1539,7 @@ export class PlaybackEngine extends EventEmitter {
                     width: Math.max(1, Math.min(desktopRight, preferredBounds.x + preferredBounds.width) - Math.max(desktopBounds.x, preferredBounds.x)),
                     height: Math.max(1, Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) - Math.max(desktopBounds.y, preferredBounds.y)),
                 };
-                const targetArea = await captureRegion(targetRegion);
+                const targetArea = await captureForMatch(() => captureRegion(targetRegion));
                 const targetBudget = stageBudgetMs('target_window');
                 const targetResponse = await this.imageService.matchImage({
                     template: templateForMatch,
@@ -1655,7 +1665,7 @@ export class PlaybackEngine extends EventEmitter {
                     width: Math.max(1, Math.min(desktopRight, rawRegion.x + rawRegion.width) - Math.max(desktopBounds.x, rawRegion.x)),
                     height: Math.max(1, Math.min(desktopBottom, rawRegion.y + rawRegion.height) - Math.max(desktopBounds.y, rawRegion.y)),
                 };
-                const searchArea = await captureRegion(region);
+                const searchArea = await captureForMatch(() => captureRegion(region));
                 const regionBudget = stageBudgetMs('region');
                 const regionResponse = await this.imageService.matchImage({
                     template: templateForMatch,
@@ -1764,7 +1774,7 @@ export class PlaybackEngine extends EventEmitter {
                             Math.max(desktopBounds.y, preferredBounds.y)
                     ),
                 };
-                const contextArea = await captureRegion(contextRegion);
+                const contextArea = await captureForMatch(() => captureRegion(contextRegion));
                 const contextBudget = Math.min(budgetLeftMs(), adaptationMode ? 140 : 100);
                 const contextResponse = await this.imageService.matchImage({
                     template: event.img_context_b64,
@@ -1896,7 +1906,7 @@ export class PlaybackEngine extends EventEmitter {
             }
 
             if (!timedOut()) {
-                const fullScreen = await captureScreen();
+                const fullScreen = await captureForMatch(() => captureScreen());
                 const fullscreenBudget = stageBudgetMs('fullscreen');
                 const fullResponse = await this.imageService.matchImage({
                     template: templateForMatch,

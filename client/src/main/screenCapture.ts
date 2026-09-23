@@ -1,4 +1,8 @@
-import { systemPreferences } from 'electron';
+import { execFile } from 'child_process';
+import { promises as fs } from 'fs';
+import os from 'os';
+import path from 'path';
+import { screen, systemPreferences } from 'electron';
 import { CoordinateNormalizer } from './coordinateNormalizer';
 
 export interface CaptureRegion {
@@ -66,7 +70,102 @@ export async function captureScreen(): Promise<Buffer> {
     .toBuffer();
 }
 
+function captureDisplayRect(rect: CaptureRegion): Promise<Buffer> {
+  const file = path.join(os.tmpdir(), `clicksmith-cap-${process.hrtime.bigint()}.png`);
+  const arg = `${Math.round(rect.x)},${Math.round(rect.y)},${Math.round(rect.width)},${Math.round(rect.height)}`;
+  return new Promise((resolve, reject) => {
+    execFile('screencapture', ['-x', '-R', arg, file], async (error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      try {
+        resolve(await fs.readFile(file));
+      } catch (readError) {
+        reject(readError);
+      } finally {
+        await fs.unlink(file).catch(() => undefined);
+      }
+    });
+  });
+}
+
+async function toLogicalPng(nativePng: Buffer, logicalWidth: number, logicalHeight: number): Promise<Buffer> {
+  const sharp = getSharpLib();
+  const metadata = await sharp(nativePng).metadata();
+  const width = metadata.width ?? logicalWidth;
+  const height = metadata.height ?? logicalHeight;
+  if (width === logicalWidth && height === logicalHeight) {
+    return nativePng;
+  }
+  return sharp(nativePng).resize(logicalWidth, logicalHeight, { fit: 'fill' }).png().toBuffer();
+}
+
+async function captureDarwinRegion(region: CaptureRegion): Promise<Buffer> {
+  const sharp = getSharpLib();
+  const desktop = CoordinateNormalizer.getVirtualLogicalBounds();
+  const requestWidth = Math.max(1, Math.round(region.width));
+  const requestHeight = Math.max(1, Math.round(region.height));
+  const requestX = Math.round(region.x);
+  const requestY = Math.round(region.y);
+  const visibleLeft = Math.max(desktop.x, requestX);
+  const visibleTop = Math.max(desktop.y, requestY);
+  const visibleRight = Math.min(desktop.x + desktop.width, requestX + requestWidth);
+  const visibleBottom = Math.min(desktop.y + desktop.height, requestY + requestHeight);
+  const visibleWidth = visibleRight - visibleLeft;
+  const visibleHeight = visibleBottom - visibleTop;
+  if (visibleWidth < 1 || visibleHeight < 1) {
+    return sharp({
+      create: {
+        width: requestWidth,
+        height: requestHeight,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 },
+      },
+    }).png().toBuffer();
+  }
+
+  const native = await captureDisplayRect({
+    x: visibleLeft,
+    y: visibleTop,
+    width: visibleWidth,
+    height: visibleHeight,
+  });
+  const scale = Math.max(1, Number(screen.getPrimaryDisplay().scaleFactor) || 1);
+  const metadata = await sharp(native).metadata();
+  const logicalWidth = Math.max(1, Math.round((metadata.width ?? visibleWidth * scale) / scale));
+  const logicalHeight = Math.max(1, Math.round((metadata.height ?? visibleHeight * scale) / scale));
+  const cropped = await toLogicalPng(native, logicalWidth, logicalHeight);
+  const placeLeft = visibleLeft - requestX;
+  const placeTop = visibleTop - requestY;
+  if (placeLeft === 0 && placeTop === 0 && logicalWidth === requestWidth && logicalHeight === requestHeight) {
+    return cropped;
+  }
+  return sharp({
+    create: {
+      width: requestWidth,
+      height: requestHeight,
+      channels: 3,
+      background: { r: 0, g: 0, b: 0 },
+    },
+  })
+    .composite([{ input: cropped, left: placeLeft, top: placeTop }])
+    .png()
+    .toBuffer();
+}
+
 export async function captureRegion(region: CaptureRegion): Promise<Buffer> {
+  if (process.platform === 'darwin') {
+    try {
+      return await captureDarwinRegion(region);
+    } catch {
+      return cropFullFrame(region);
+    }
+  }
+  return cropFullFrame(region);
+}
+
+async function cropFullFrame(region: CaptureRegion): Promise<Buffer> {
   const sharp = getSharpLib();
   const screen = await captureScreen();
   const metadata = await sharp(screen).metadata();
