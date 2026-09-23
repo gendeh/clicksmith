@@ -733,10 +733,20 @@ describe('PlaybackEngine', () => {
       { x: 40, y: 30 }
     );
 
-    expect(ocrImage).toHaveBeenCalled();
+    expect(ocrImage).toHaveBeenCalledTimes(1);
+    expect(ocrImage.mock.calls[0][0].image).toBe(Buffer.from('region').toString('base64'));
+    expect(regionSpy).toHaveBeenCalledTimes(1);
+    const captured = regionSpy.mock.calls[0][0];
+    expect(captured.width).toBeLessThanOrEqual(640);
+    expect(captured.height).toBeLessThanOrEqual(640);
+    expect(captured.x).toBeLessThanOrEqual(240);
+    expect(captured.x + captured.width).toBeGreaterThanOrEqual(240);
+    expect(captured.y).toBeLessThanOrEqual(90);
+    expect(captured.y + captured.height).toBeGreaterThanOrEqual(90);
+    expect(screenSpy).not.toHaveBeenCalled();
     expect(result).toEqual({ x: 240, y: 90 });
     expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
-    expect(engine.getStatus().smartClickLastSource).toBe('fullscreen');
+    expect(engine.getStatus().smartClickLastSource).toBe('region');
     regionSpy.mockRestore();
     screenSpy.mockRestore();
   });

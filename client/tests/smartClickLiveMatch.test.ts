@@ -279,6 +279,114 @@ liveMatch('a recorded word is what playback clicks after the window moves', asyn
   screenSpy.mockRestore();
 });
 
+liveMatch('a screen target clicks the recorded word inside the search radius', async () => {
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const sharp = require('sharp');
+  const patch = await patternPng(96);
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockImplementation(async (region) => {
+    if (region.width > 640 || region.height > 640) {
+      throw new Error(`desktop capture ${region.width}x${region.height}`);
+    }
+    const width = Math.max(1, Math.round(region.width));
+    const height = Math.max(1, Math.round(region.height));
+    return sharp(
+      Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}">
+        <rect width="${width}" height="${height}" fill="black"/>
+        <text x="48" y="140" font-size="72" font-family="Helvetica" fill="white">Submit</text>
+      </svg>`)
+    ).png().toBuffer();
+  });
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-screen-word',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: 40,
+      y: 30,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { ocr_primary_text_normalized: 'submit' },
+    },
+    { x: 40, y: 30 }
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  const neighborhood = captureSpy.mock.calls[0][0];
+  expect(captureSpy).toHaveBeenCalledTimes(1);
+  expect(neighborhood.width).toBeLessThanOrEqual(640);
+  expect(neighborhood.height).toBeLessThanOrEqual(640);
+  expect(screenSpy).not.toHaveBeenCalled();
+  expect(status.smartClickLastMethod).toBe('ocr');
+  expect(status.smartClickLastSource).toBe('region');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(result).not.toEqual({ x: 40, y: 30 });
+  expect(result.x).toBeGreaterThanOrEqual(neighborhood.x);
+  expect(result.x).toBeLessThanOrEqual(neighborhood.x + neighborhood.width);
+  expect(result.y).toBeGreaterThanOrEqual(neighborhood.y);
+  expect(result.y).toBeLessThanOrEqual(neighborhood.y + neighborhood.height);
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const file = path.join(os.tmpdir(), `sc-screen-word-${process.pid}.png`);
+  const arg = `${Math.round(neighborhood.x)},${Math.round(neighborhood.y)},${Math.round(neighborhood.width)},${Math.round(neighborhood.height)}`;
+  const captureStarted = Date.now();
+  await new Promise<void>((resolve, reject) => {
+    execFile('screencapture', ['-x', '-R', arg, file], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  const captureMs = Date.now() - captureStarted;
+  const native = await fs.promises.readFile(file);
+  await fs.promises.unlink(file).catch(() => undefined);
+  const resizeStarted = Date.now();
+  const fitted = await sharp(native)
+    .resize(Math.round(neighborhood.width), Math.round(neighborhood.height), { fit: 'fill' })
+    .png()
+    .toBuffer();
+  const resizeMs = Date.now() - resizeStarted;
+  const wallMs = captureMs + resizeMs + elapsed;
+  expect(fitted.length).toBeLessThan(1_500_000);
+  expect(native.length).toBeLessThan(7_000_000);
+  if (wallMs >= 460) {
+    throw new Error(
+      `capture ${captureMs}ms + resize ${resizeMs}ms + match/ocr ${elapsed}ms = ${wallMs}ms click (${result.x}, ${result.y}) bytes ${native.length}`
+    );
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

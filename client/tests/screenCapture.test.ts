@@ -75,5 +75,9 @@ test('a patch clipped by the screen edge keeps the click at its center', async (
   expect(data[corner]).toBe(0);
   expect(data[corner + 1]).toBe(0);
   expect(data[corner + 2]).toBe(0);
-  expect(mockCaptureArgs[0]).toEqual(['screencapture', '-x', '-R', '0,0,30,30', expect.any(String)]);
+  if (process.platform === 'darwin') {
+    expect(mockCaptureArgs[0]).toEqual(['screencapture', '-x', '-R', '0,0,30,30', expect.any(String)]);
+  } else {
+    expect(mockCaptureArgs).toEqual([]);
+  }
 });

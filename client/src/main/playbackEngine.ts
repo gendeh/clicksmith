@@ -788,7 +788,8 @@ export class PlaybackEngine extends EventEmitter {
         stageRegion: WindowBounds,
         expected: { x: number; y: number },
         threshold: number,
-        timeoutMs: number
+        timeoutMs: number,
+        capturedImage?: Buffer
     ): Promise<SmartClickCandidateSelection | null> {
         const metadata = event.metadata as Record<string, unknown> | undefined;
         const rawText = this.recordedOcrQuery(event);
@@ -797,7 +798,7 @@ export class PlaybackEngine extends EventEmitter {
         }
         const offsetNormX = typeof metadata?.ocr_anchor_norm_x === 'number' ? metadata.ocr_anchor_norm_x : 0;
         const offsetNormY = typeof metadata?.ocr_anchor_norm_y === 'number' ? metadata.ocr_anchor_norm_y : 0;
-        const image = await captureRegion(stageRegion);
+        const image = capturedImage ?? await captureRegion(stageRegion);
         const response = await this.imageService.ocrImage({
             image: image.toString('base64'),
             timeoutMs,
@@ -1487,6 +1488,27 @@ export class PlaybackEngine extends EventEmitter {
         const desktopBounds = CoordinateNormalizer.getVirtualLogicalBounds();
         const desktopRight = desktopBounds.x + desktopBounds.width;
         const desktopBottom = desktopBounds.y + desktopBounds.height;
+        const clipNeighborhood = (center: { x: number; y: number }, radius: number): WindowBounds => {
+            const rawRegion = {
+                x: center.x - radius,
+                y: center.y - radius,
+                width: radius * 2,
+                height: radius * 2,
+            };
+            return {
+                x: Math.max(desktopBounds.x, rawRegion.x),
+                y: Math.max(desktopBounds.y, rawRegion.y),
+                width: Math.max(
+                    1,
+                    Math.min(desktopRight, rawRegion.x + rawRegion.width) - Math.max(desktopBounds.x, rawRegion.x)
+                ),
+                height: Math.max(
+                    1,
+                    Math.min(desktopBottom, rawRegion.y + rawRegion.height) - Math.max(desktopBounds.y, rawRegion.y)
+                ),
+            };
+        };
+        let nearbyCapture: { image: Buffer; region: WindowBounds } | null = null;
         if (attempt === 0) {
             this.smartClickAttemptBounds = await this.getSmartClickTargetBoundsAsync(
                 this.clock.now() + PlaybackEngine.SMART_CLICK_BOUNDS_WAIT_MS
@@ -1690,19 +1712,9 @@ export class PlaybackEngine extends EventEmitter {
 
             if (imageStageOpen()) {
                 const searchCenter = fallbackCoords;
-                const rawRegion = {
-                    x: searchCenter.x - searchRadius,
-                    y: searchCenter.y - searchRadius,
-                    width: searchRadius * 2,
-                    height: searchRadius * 2,
-                };
-                const region = {
-                    x: Math.max(desktopBounds.x, rawRegion.x),
-                    y: Math.max(desktopBounds.y, rawRegion.y),
-                    width: Math.max(1, Math.min(desktopRight, rawRegion.x + rawRegion.width) - Math.max(desktopBounds.x, rawRegion.x)),
-                    height: Math.max(1, Math.min(desktopBottom, rawRegion.y + rawRegion.height) - Math.max(desktopBounds.y, rawRegion.y)),
-                };
+                const region = clipNeighborhood(searchCenter, searchRadius);
                 const searchArea = await captureForMatch(() => captureRegion(region));
+                nearbyCapture = { image: searchArea, region };
                 const regionBudget = Math.min(stageBudgetMs('region'), imageBudgetLeftMs());
                 const regionResponse = await this.imageService.matchImage({
                     template: templateForMatch,
@@ -1896,7 +1908,7 @@ export class PlaybackEngine extends EventEmitter {
             const hasRecordedText =
                 this.recordedOcrQuery(event).length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN;
             if (!timedOut() && (preferredBounds || hasRecordedText)) {
-                const ocrRegion = preferredBounds
+                const windowRegion = preferredBounds
                     ? {
                           x: Math.max(desktopBounds.x, preferredBounds.x),
                           y: Math.max(desktopBounds.y, preferredBounds.y),
@@ -1911,12 +1923,8 @@ export class PlaybackEngine extends EventEmitter {
                                   Math.max(desktopBounds.y, preferredBounds.y)
                           ),
                       }
-                    : {
-                          x: desktopBounds.x,
-                          y: desktopBounds.y,
-                          width: Math.max(1, desktopBounds.width),
-                          height: Math.max(1, desktopBounds.height),
-                      };
+                    : null;
+                const ocrRegion = windowRegion ?? nearbyCapture?.region ?? clipNeighborhood(fallbackCoords, searchRadius);
                 const ocrTimeoutMs = Math.max(budgetLeftMs(), ocrReserveMs);
                 const pickedOcr = ocrTimeoutMs > 0
                     ? await this.tryOcrSmartClickFallback(
@@ -1924,7 +1932,8 @@ export class PlaybackEngine extends EventEmitter {
                           ocrRegion,
                           expected,
                           adaptationMode ? 0.52 : fullscreenThreshold,
-                          ocrTimeoutMs
+                          ocrTimeoutMs,
+                          windowRegion ? undefined : nearbyCapture?.image
                       )
                     : null;
                 if (pickedOcr) {
@@ -1949,7 +1958,7 @@ export class PlaybackEngine extends EventEmitter {
                         smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
                     };
                     this.markSmartClickSource(
-                        preferredBounds ? 'window' : 'fullscreen',
+                        preferredBounds ? 'window' : 'region',
                         pickedOcr.method,
                         pickedOcr.confidence,
                         pickedOcr.dhashDistance,
