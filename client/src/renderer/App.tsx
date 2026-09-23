@@ -127,6 +127,10 @@ const App: React.FC = () => {
   }, [selectedProfileId]);
 
   useEffect(() => {
+    void ipc.invoke(IPC_CHANNELS.WINDOW_FOCUS, activeTarget);
+  }, [activeTarget]);
+
+  useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
 

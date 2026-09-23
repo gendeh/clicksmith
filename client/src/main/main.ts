@@ -18,6 +18,7 @@ import { ProfileStore } from './profileStore';
 import { SettingsStore } from './settingsStore';
 import { runAutoTune } from './autoTune';
 import { WindowManager } from './windowManager';
+import { hotkeyTarget } from './hotkeyTarget';
 import { syncProfileDeleteToCloud, syncProfileToCloud } from './cloudSync';
 import { ModManager } from './modManager';
 import { createDefaultInputHook, HookEvent, HookMouseEvent, InputHook } from './inputHooks';
@@ -44,6 +45,7 @@ let lastProfileId: string | null = null;
 let currentRecordingTarget: string | null = null;
 let lastPlaybackProfile: Profile | null = null;
 let lastPlaybackTarget: string | null = null;
+let selectedUiTarget = 'screen';
 let lastPlaybackLeadInMs = 0;
 let lastDraftProfile: Profile | null = null;
 let draftQuickReplayPending = false;
@@ -1444,6 +1446,8 @@ function setupIpcHandlers() {
     const normalized = buildRecordingConfig(config);
     clearPendingDraftState();
     currentRecordingTarget = normalized.target;
+    selectedUiTarget = hotkeyTarget(normalized.target);
+    lastPlaybackTarget = selectedUiTarget;
     const preferences = settingsStore.getPreferences();
     const adapterReachable = await isModAdapterReachable();
     const useModAdapterForThisRun =
@@ -1507,6 +1511,7 @@ function setupIpcHandlers() {
     lastProfileId = profile.id;
     lastPlaybackProfile = profile;
     lastPlaybackTarget = playbackConfig.target;
+    selectedUiTarget = hotkeyTarget(playbackConfig.target);
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
     lastPlaybackLeadInMs = 0;
@@ -1667,6 +1672,12 @@ function setupIpcHandlers() {
 
   registerValidatedHandle(IPC_CHANNELS.WINDOW_LIST, isNoPayload, async () => windowManager.listWindowsForPicker());
 
+  registerValidatedHandle(IPC_CHANNELS.WINDOW_FOCUS, isString, async target => {
+    selectedUiTarget = hotkeyTarget(target);
+    lastPlaybackTarget = selectedUiTarget;
+    return { success: true, target: selectedUiTarget };
+  });
+
   registerValidatedHandle(IPC_CHANNELS.SETTINGS_GET, isNoPayload, async () => ({
     preferences: settingsStore.getPreferences(),
     subscription: settingsStore.getSubscription(),
@@ -1791,17 +1802,19 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     }
 
     const adapterReachable = await isModAdapterReachable();
+    const recordTarget = hotkeyTarget(selectedUiTarget);
     const useModAdapterForThisRun = adapterReachable && preferences.useModAdapter;
     clearPendingDraftState();
     if (useModAdapterForThisRun) {
-      const result = await startModRecording('screen').catch(() => null);
+      const result = await startModRecording(recordTarget).catch(() => null);
       if (result?.success) return;
       broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle', error: result?.error ?? 'record_start_failed' });
       return;
     }
 
-    currentRecordingTarget = 'screen';
-    await recordingEngine.start(buildRecordingConfig({ target: 'screen' }));
+    currentRecordingTarget = recordTarget;
+    lastPlaybackTarget = recordTarget;
+    await recordingEngine.start(buildRecordingConfig({ target: recordTarget }));
     applyLifecycle('arm_record', 'local_record_start_hotkey');
     applyLifecycle('attempt_boundary', 'local_record_live_hotkey');
     mainWindow?.webContents.send(IPC_CHANNELS.RECORDING_STATUS, {
@@ -1897,11 +1910,12 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       return;
     }
 
-    lastPlaybackTarget = 'screen';
+    const playTarget = hotkeyTarget(selectedUiTarget, profile.target_app);
+    lastPlaybackTarget = playTarget;
     const runtime = buildRuntimePlaybackProfile(profile);
     lastPlaybackLeadInMs = runtime.leadInMs;
     const result = await playbackEngine.start(
-      buildPlaybackConfig({ profileId, target: 'screen' }),
+      buildPlaybackConfig({ profileId, target: playTarget }),
       runtime.profile
     );
     if (result.success && shouldAutoTakeover()) {
@@ -1955,11 +1969,12 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       );
       return;
     }
-    lastPlaybackTarget = 'screen';
+    const playTarget = hotkeyTarget(selectedUiTarget, profile.target_app);
+    lastPlaybackTarget = playTarget;
     const runtime = buildRuntimePlaybackProfile(profile);
     lastPlaybackLeadInMs = runtime.leadInMs;
     const result = await playbackEngine.start(
-      buildPlaybackConfig({ profileId, target: 'screen' }),
+      buildPlaybackConfig({ profileId, target: playTarget }),
       runtime.profile
     );
     if (result.success && shouldAutoTakeover()) {

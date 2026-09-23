@@ -150,6 +150,8 @@ export function installVerifyBridge() {
           return Array.from(profiles.values());
         case IPC_CHANNELS.PROFILE_GET:
           return typeof payload === 'string' ? profiles.get(payload) ?? null : null;
+        case IPC_CHANNELS.WINDOW_FOCUS:
+          return { success: true, target: typeof payload === 'string' ? payload : 'screen' };
         case IPC_CHANNELS.WINDOW_LIST:
           return [
             {
