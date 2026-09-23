@@ -391,7 +391,7 @@ def test_absent_patch_stops_after_the_endpoint_scales(monkeypatch):
     assert res.status_code == 200
     data = res.get_json()
     assert data["success"] is False
-    assert len(calls) <= 4
+    assert len(calls) <= 6
 
 
 def test_template_at_125_percent_still_clicks_the_scaled_center():
@@ -421,6 +421,37 @@ def test_template_at_125_percent_still_clicks_the_scaled_center():
     assert abs(float(match["scale"]) - scale) <= 0.08
     assert abs(float(match["x"]) - center_x) <= 8
     assert abs(float(match["y"]) - center_y) <= 8
+
+
+def test_hybrid_at_120_percent_clicks_the_scaled_center():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(96)
+    origin = (40, 50)
+    scale = 1.2
+    search = embed_scaled_template(template, scale, canvas_size=640, origin=origin)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.25,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="hybrid",
+        max_budget_ms=260,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert float(match["confidence"]) >= 0.92
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+    assert match["method"] == "template"
+    assert data["processingTimeMs"] <= 260
 
 
 def test_template_at_110_and_90_percent_clicks_the_scaled_center():

@@ -228,7 +228,7 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
     preferred = [round(scale_hint, 3), round(min_scale, 3), round(max_scale, 3)]
     # When hint is near 1.0, aggressively probe browser zoom pivots early.
     if abs(scale_hint - 1.0) <= 0.08:
-        preferred.extend([1.1, 0.9, 0.8, 1.25, 0.75, 1.33, 0.67, 1.5, 1.67, 2.0])
+        preferred.extend([1.1, 0.9, 1.2, 0.8, 1.25, 0.75, 1.33, 0.67, 1.5, 1.67, 2.0])
 
     ordered = []
     seen = set()
@@ -357,7 +357,7 @@ def match_template_multiscale(
             if best_match and score_of(best_match) >= DECISIVE_TEMPLATE_CONFIDENCE:
                 stopped_on_decisive = True
                 break
-            if tried >= 3 and (best_match is None or score_of(best_match) < HOPELESS_TEMPLATE_CONFIDENCE):
+            if tried >= 5 and (best_match is None or score_of(best_match) < HOPELESS_TEMPLATE_CONFIDENCE):
                 break
 
     if not stopped_on_decisive and best_scale is not None and scale_fits():
@@ -605,8 +605,10 @@ def match_image():
             feature_floor = 0 if method == "feature" else 50
             should_try_feature = budget_left > feature_floor and (
                 method == "feature"
-                or not best_match
-                or best_match["confidence"] < max(0.82, threshold + 0.12)
+                or (
+                    best_match is not None
+                    and best_match["confidence"] < max(0.82, threshold + 0.12)
+                )
             )
             if should_try_feature:
                 if method == "feature":
@@ -624,6 +626,13 @@ def match_image():
                     feature_match.get("scale"), min_scale, max_scale
                 ):
                     feature_match = None
+                if method != "feature" and feature_match and feature_match.get("homography_ok") is True:
+                    try:
+                        reported_scale = float(feature_match.get("scale"))
+                    except (TypeError, ValueError):
+                        reported_scale = None
+                    if reported_scale is not None and abs(reported_scale - 1.0) > 0.12:
+                        feature_match = None
                 if feature_match:
                     if not matches:
                         matches = [feature_match]
