@@ -223,6 +223,10 @@ export class WindowManager {
         return entry.bounds;
     }
 
+    private getLastKnownTargetBounds(normalizedTarget: string): WindowBounds | null {
+        return this.targetBoundsCache.get(normalizedTarget)?.bounds ?? null;
+    }
+
     private getImmediateTargetBoundsFromNative(normalizedTarget: string): WindowBounds | null {
         const native = this.getNativeWindows();
         if (!native.length) return null;
@@ -289,10 +293,11 @@ export class WindowManager {
             return immediate;
         }
 
-        const cached = this.getCachedTargetBounds(normalizedTarget);
-        if (cached) {
+        const known =
+            this.getCachedTargetBounds(normalizedTarget) ?? this.getLastKnownTargetBounds(normalizedTarget);
+        if (known) {
             void this.getTargetBoundsAsync(normalizedTarget).catch(() => null);
-            return cached;
+            return known;
         }
 
         void this.getTargetBoundsAsync(normalizedTarget).catch(() => null);
