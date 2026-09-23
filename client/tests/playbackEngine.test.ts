@@ -2060,4 +2060,89 @@ describe('PlaybackEngine', () => {
     await engine.stop();
     jest.useRealTimers();
   });
+
+  test('a slow window lookup still clicks recorded text before the click wait ends', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () => resolve({ success: true, matches: [], bestMatch: null, processingTimeMs: 90 }),
+              90
+            );
+          }),
+        ocrImage: (request: { timeoutMs?: number }) =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  success: true,
+                  processingTimeMs: request.timeoutMs,
+                  items: [
+                    {
+                      text: 'Submit',
+                      confidence: 91,
+                      bounds: { x: 40, y: 30, width: 80, height: 20 },
+                    },
+                  ],
+                }),
+              request.timeoutMs ?? 120
+            );
+          }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({ x: 800, y: 100, width: 800, height: 600 }), 190);
+          }),
+      } as any,
+    }) as any;
+    engine.smartClickAnchor = { dx: 0, dy: 0 };
+    engine.smartClickAnchorTrust = 3;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: 40,
+      y: 30,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: Buffer.from('template').toString('base64'),
+      metadata: {
+        ocr_primary_text_normalized: 'submit',
+        ocr_anchor_norm_x: 0.25,
+        ocr_anchor_norm_y: -0.5,
+      },
+    };
+    const expected = { x: 40, y: 30 };
+    const inflight = engine.resolveSmartClick(event, expected);
+    engine.smartClickPromises.set(0, inflight);
+    engine.smartClickTelemetry.set(0, { open: true });
+    const pending = engine.getSmartClickCoords(0, event, expected);
+    await jest.advanceTimersByTimeAsync(460);
+    await expect(pending).resolves.toEqual({ x: 900, y: 130 });
+    expect(engine.getStatus().smartClickLastSource).toBe('window');
+    expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
+    expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+    jest.useRealTimers();
+  });
 });

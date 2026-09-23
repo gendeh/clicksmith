@@ -977,11 +977,11 @@ export class PlaybackEngine extends EventEmitter {
             method: 'hybrid',
             findAll: true,
             maxMatches: 4,
-            timeoutMs: Math.max(40, Math.min(180, requestTimeoutMs)),
+            timeoutMs: Math.min(180, Math.max(0, requestTimeoutMs)),
             minScale,
             maxScale,
             scaleHint: referenceScale,
-            maxBudgetMs: Math.max(30, Math.min(90, budgetMs)),
+            maxBudgetMs: Math.min(90, Math.max(0, budgetMs)),
         });
         const candidates = this.getMatchCandidates(response);
         const confirmed = await this.pickBestSmartClickCandidate(
@@ -1437,6 +1437,7 @@ export class PlaybackEngine extends EventEmitter {
         const scaleWindow = this.getSmartClickScaleWindow(adaptationMode);
         const requestTimeoutMs = adaptationMode ? 260 : (this.smartClickAnchor ? 220 : 320);
         const timedOut = () => this.clock.now() - startedAt >= PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
+        const budgetLeftMs = () => Math.max(0, budgetDeadline - this.clock.now());
         const remainingBudgetMs = () =>
             Math.max(20, PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS - (this.clock.now() - startedAt));
         const stageBudgetMs = (stage: SmartClickStage) => {
@@ -1720,7 +1721,7 @@ export class PlaybackEngine extends EventEmitter {
                     ),
                 };
                 const contextArea = await captureRegion(contextRegion);
-                const contextBudget = Math.max(30, Math.min(remainingBudgetMs(), adaptationMode ? 140 : 100));
+                const contextBudget = Math.min(budgetLeftMs(), adaptationMode ? 140 : 100);
                 const contextResponse = await this.imageService.matchImage({
                     template: event.img_context_b64,
                     templateHash: typeof event.metadata?.img_context_hash === 'string' ? event.metadata.img_context_hash : undefined,
@@ -1729,7 +1730,7 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'feature',
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
-                    timeoutMs: Math.max(40, Math.min(stageTimeoutMs('target_window'), 220)),
+                    timeoutMs: contextBudget,
                     minScale: scaleWindow.minScale,
                     maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
@@ -1816,13 +1817,16 @@ export class PlaybackEngine extends EventEmitter {
                             Math.max(desktopBounds.y, preferredBounds.y)
                     ),
                 };
-                const pickedOcr = await this.tryOcrSmartClickFallback(
-                    event,
-                    ocrRegion,
-                    expected,
-                    adaptationMode ? 0.52 : fullscreenThreshold,
-                    Math.max(120, Math.min(900, remainingBudgetMs()))
-                );
+                const ocrTimeoutMs = budgetLeftMs();
+                const pickedOcr = ocrTimeoutMs > 0
+                    ? await this.tryOcrSmartClickFallback(
+                          event,
+                          ocrRegion,
+                          expected,
+                          adaptationMode ? 0.52 : fullscreenThreshold,
+                          ocrTimeoutMs
+                      )
+                    : null;
                 if (pickedOcr) {
                     if (!telemetry.open) return pickedOcr.coords;
                     this.recordSmartClickStableScale(this.smartClickScaleHint ?? undefined);
