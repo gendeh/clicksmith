@@ -667,6 +667,144 @@ liveMatch('a painted patch is not clicked at a modest lookalike', async () => {
   expect(status.smartClickLastConfidence).toBeUndefined();
 }, 20000);
 
+liveMatch('a moved screen target clicks the context image when the patch is painted out', async () => {
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const origin = { x: 400, y: 300 };
+  const size = 640;
+  const shift = 24;
+  const patchOrigin = { x: 220, y: 180 };
+  const patchSize = 96;
+  const raw = Buffer.alloc(size * size * 3);
+  const tile = 40;
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const i = (y * size + x) * 3;
+      const tx = Math.floor(x / tile);
+      const ty = Math.floor(y / tile);
+      raw[i] = (tx * 37 + ty * 17) % 200 + 30;
+      raw[i + 1] = (tx * 13 + ty * 53) % 200 + 20;
+      raw[i + 2] = (tx * 71 + ty * 29) % 200 + 15;
+      const inPatch =
+        x >= patchOrigin.x &&
+        x < patchOrigin.x + patchSize &&
+        y >= patchOrigin.y &&
+        y < patchOrigin.y + patchSize;
+      if (inPatch) {
+        const bar = Math.floor((x - patchOrigin.x) / 6) % 2 === 0;
+        raw[i] = bar ? 250 : 12;
+        raw[i + 1] = bar ? 20 : 230;
+        raw[i + 2] = ((y - patchOrigin.y) * 9) % 255;
+      }
+    }
+  }
+  const logical = await sharp(raw, { raw: { width: size, height: size, channels: 3 } }).png().toBuffer();
+  const patch = await sharp(logical)
+    .extract({ left: patchOrigin.x, top: patchOrigin.y, width: patchSize, height: patchSize })
+    .png()
+    .toBuffer();
+  const contextSize = 288;
+  const contextOrigin = {
+    x: patchOrigin.x + patchSize / 2 - contextSize / 2,
+    y: patchOrigin.y + patchSize / 2 - contextSize / 2,
+  };
+  const context = await sharp(logical)
+    .extract({
+      left: contextOrigin.x,
+      top: contextOrigin.y,
+      width: contextSize,
+      height: contextSize,
+    })
+    .png()
+    .toBuffer();
+  const moved = await sharp(logical)
+    .extract({ left: 0, top: 0, width: size - shift, height: size - shift })
+    .png()
+    .toBuffer();
+  const shifted = await sharp({
+    create: { width: size, height: size, channels: 3, background: { r: 0, g: 0, b: 0 } },
+  })
+    .composite([{ input: moved, left: shift, top: shift }])
+    .png()
+    .toBuffer();
+  const paint = await sharp({
+    create: { width: patchSize, height: patchSize, channels: 3, background: { r: 220, g: 30, b: 30 } },
+  }).png().toBuffer();
+  const painted = await sharp(shifted)
+    .composite([{ input: paint, left: patchOrigin.x + shift, top: patchOrigin.y + shift }])
+    .png()
+    .toBuffer();
+  const recordedHash = await computeDHash(patch);
+  const recorded = { x: origin.x + size / 2, y: origin.y + size / 2 };
+  const visual = {
+    x: origin.x + patchOrigin.x + shift + patchSize / 2,
+    y: origin.y + patchOrigin.y + shift + patchSize / 2,
+  };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(painted);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-context-move',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      img_context_b64: context.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  expect(screenSpy).not.toHaveBeenCalled();
+  if (
+    Math.abs(result.x - visual.x) > 8 ||
+    Math.abs(result.y - visual.y) > 8
+  ) {
+    throw new Error(
+      `click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} source ${status.smartClickLastSource}`
+    );
+  }
+  expect(result).not.toEqual(recorded);
+  expect(status.smartClickLastMethod).toBe('feature');
+  expect(status.smartClickLastSource).toBe('region');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  if (elapsed >= 460) {
+    throw new Error(`context click took ${elapsed}ms at (${result.x}, ${result.y})`);
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

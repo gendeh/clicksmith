@@ -91,7 +91,7 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_MAX_HASH_EVALS = 8;
     private static readonly SMART_CLICK_DHASH_MAX_DISTANCE = 32;
     private static readonly SMART_CLICK_DHASH_WEAK_MAX_DISTANCE = 12;
-    private static readonly SMART_CLICK_STRONG_MATCH_CONFIDENCE = 0.85;
+    private static readonly SMART_CLICK_STRONG_MATCH_CONFIDENCE = 0.92;
     private static readonly SMART_CLICK_COLLECTION_MIN_CONFIDENCE = 0.25;
     private static readonly SMART_CLICK_ADAPTIVE_COLLECTION_MIN_CONFIDENCE = 0.2;
     private static readonly SMART_CLICK_ANCHOR_MAX_ABS_OFFSET_PX = 520;
@@ -106,6 +106,7 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_CONFIRM_MIN_CONFIDENCE = 0.55;
     private static readonly SMART_CLICK_OCR_MIN_TEXT_LEN = 2;
     private static readonly SMART_CLICK_OCR_RESERVE_MS = 120;
+    private static readonly SMART_CLICK_CONTEXT_RESERVE_MS = 80;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
     private smartClickAnchor: { dx: number; dy: number } | null = null;
@@ -1347,8 +1348,7 @@ export class PlaybackEngine extends EventEmitter {
             const featureReliable =
                 method !== 'feature' ||
                 featureHomography ||
-                (featureInliers !== undefined && featureInliers >= (adaptationMode ? 6 : 8)) ||
-                candidate.confidence >= baseThreshold;
+                (featureInliers !== undefined && featureInliers >= (adaptationMode ? 6 : 8));
             if (!featureReliable) {
                 continue;
             }
@@ -1439,6 +1439,7 @@ export class PlaybackEngine extends EventEmitter {
             return null;
         }
         if (
+            best.method !== 'feature' &&
             best.confidence < PlaybackEngine.SMART_CLICK_STRONG_MATCH_CONFIDENCE &&
             typeof best.dhashDistance === 'number' &&
             best.dhashDistance > PlaybackEngine.SMART_CLICK_DHASH_WEAK_MAX_DISTANCE
@@ -1727,7 +1728,11 @@ export class PlaybackEngine extends EventEmitter {
                 nearbyCapture = { image: searchArea, region };
                 const regionBudget = preferredBounds
                     ? Math.min(stageBudgetMs('region'), imageBudgetLeftMs())
-                    : imageBudgetLeftMs();
+                    : Math.max(
+                          20,
+                          imageBudgetLeftMs() -
+                              (event.img_context_b64 ? PlaybackEngine.SMART_CLICK_CONTEXT_RESERVE_MS : 0)
+                      );
                 const regionResponse = await this.imageService.matchImage({
                     template: templateForMatch,
                     templateHash,
@@ -1820,23 +1825,30 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (imageStageOpen() && preferredBounds && event.img_context_b64) {
-                const contextRegion = {
-                    x: Math.max(desktopBounds.x, preferredBounds.x),
-                    y: Math.max(desktopBounds.y, preferredBounds.y),
-                    width: Math.max(
-                        1,
-                        Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
-                            Math.max(desktopBounds.x, preferredBounds.x)
-                    ),
-                    height: Math.max(
-                        1,
-                        Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
-                            Math.max(desktopBounds.y, preferredBounds.y)
-                    ),
-                };
-                const contextArea = await captureForMatch(() => captureRegion(contextRegion));
-                const contextBudget = Math.min(imageBudgetLeftMs(), adaptationMode ? 140 : 100);
+            if (imageStageOpen() && event.img_context_b64 && (preferredBounds || nearbyCapture)) {
+                const contextRegion = preferredBounds
+                    ? {
+                          x: Math.max(desktopBounds.x, preferredBounds.x),
+                          y: Math.max(desktopBounds.y, preferredBounds.y),
+                          width: Math.max(
+                              1,
+                              Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
+                                  Math.max(desktopBounds.x, preferredBounds.x)
+                          ),
+                          height: Math.max(
+                              1,
+                              Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
+                                  Math.max(desktopBounds.y, preferredBounds.y)
+                          ),
+                      }
+                    : nearbyCapture!.region;
+                const contextArea = preferredBounds
+                    ? await captureForMatch(() => captureRegion(contextRegion))
+                    : nearbyCapture!.image;
+                const contextBudget = Math.min(
+                    Math.max(0, budgetLeftMs() - ocrReserveMs),
+                    adaptationMode ? 140 : 100
+                );
                 const contextResponse = await this.imageService.matchImage({
                     template: event.img_context_b64,
                     templateHash: typeof event.metadata?.img_context_hash === 'string' ? event.metadata.img_context_hash : undefined,
@@ -1907,7 +1919,7 @@ export class PlaybackEngine extends EventEmitter {
                         smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
                     };
                     this.markSmartClickSource(
-                        'window',
+                        preferredBounds ? 'window' : 'region',
                         pickedContext.method,
                         pickedContext.confidence,
                         pickedContext.dhashDistance,

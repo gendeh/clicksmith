@@ -1068,7 +1068,7 @@ describe('PlaybackEngine', () => {
     screenSpy.mockRestore();
   });
 
-  test('a 0.66 feature match without homography still clicks the window', async () => {
+  test('a feature match without homography stays on the recorded point', async () => {
     const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
     const match = {
       x: 90,
@@ -1118,8 +1118,9 @@ describe('PlaybackEngine', () => {
       { x: 40, y: 30 }
     );
 
-    expect(result).toEqual({ x: 590, y: 270 });
-    expect(engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.66);
+    expect(result).toEqual({ x: 40, y: 30 });
+    expect(engine.getStatus().smartClickLastConfidence).toBeUndefined();
+    expect(engine.getStatus().successfulMatches).toBe(0);
     captureSpy.mockRestore();
   });
 
@@ -3273,9 +3274,113 @@ describe('PlaybackEngine', () => {
     expect(scaled.status.smartClickLastSource).toBe('expected_fallback');
     expect(scaled.status.successfulMatches).toBe(0);
 
+    const almost = await run({ confidence: 0.9, scale: 1 });
+    expect(almost.result).toEqual(recorded);
+    expect(almost.status.smartClickLastSource).toBe('expected_fallback');
+
     const strong = await run({ confidence: 0.95, scale: 1 });
     expect(strong.result).toEqual({ x: 400, y: 340 });
     expect(strong.status.smartClickLastConfidence).toBeCloseTo(0.95);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
+
+  test('a screen target uses the context image when the small patch is gone', async () => {
+    const sharp = require('sharp');
+    const checker = Buffer.alloc(96 * 96 * 3);
+    const stripes = Buffer.alloc(200 * 200 * 3);
+    for (let y = 0; y < 96; y += 1) {
+      for (let x = 0; x < 96; x += 1) {
+        const on = ((x >> 3) ^ (y >> 3)) & 1;
+        const i = (y * 96 + x) * 3;
+        checker[i] = checker[i + 1] = checker[i + 2] = on ? 255 : 0;
+      }
+    }
+    for (let y = 0; y < 200; y += 1) {
+      for (let x = 0; x < 200; x += 1) {
+        const on = x % 12 < 6;
+        const i = (y * 200 + x) * 3;
+        stripes[i] = on ? 240 : 20;
+        stripes[i + 1] = on ? 40 : 180;
+        stripes[i + 2] = on ? 40 : 60;
+      }
+    }
+    const patch = await sharp(checker, { raw: { width: 96, height: 96, channels: 3 } }).png().toBuffer();
+    const context = await sharp(stripes, { raw: { width: 200, height: 200, channels: 3 } })
+      .extract({ left: 20, top: 20, width: 96, height: 96 })
+      .png()
+      .toBuffer();
+    const search = await sharp(stripes, { raw: { width: 200, height: 200, channels: 3 } }).png().toBuffer();
+    const recordedHash = await computeDHash(patch);
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(search);
+    const impostor = {
+      x: 100,
+      y: 40,
+      confidence: 0.68,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 52, y: 0, width: 96, height: 96 },
+    };
+    const feature = {
+      x: 40,
+      y: 100,
+      confidence: 0.8,
+      method: 'feature' as const,
+      scale: 1,
+      homography_ok: true,
+      inliers: 12,
+      bounds: { x: 0, y: 52, width: 96, height: 96 },
+    };
+    const matchImage = jest.fn(async (request: { method?: string; template?: string; searchArea?: string; maxBudgetMs?: number }) => {
+      if (request.method === 'feature') {
+        return { success: true, matches: [feature], bestMatch: feature, processingTimeMs: 20 };
+      }
+      return { success: true, matches: [impostor], bestMatch: impostor, processingTimeMs: 40 };
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: { matchImage } as any,
+      windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'screen',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      imageSearchRadius: 100,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const recorded = { x: 400, y: 400 };
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse' as const,
+        btn: 'left' as const,
+        x: recorded.x,
+        y: recorded.y,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: patch.toString('base64'),
+        img_context_b64: context.toString('base64'),
+        metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+      },
+      recorded
+    );
+    expect(result).toEqual({ x: 340, y: 400 });
+    expect(engine.getStatus().smartClickLastMethod).toBe('feature');
+    expect(engine.getStatus().smartClickLastSource).toBe('region');
+    expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    expect(screenSpy).not.toHaveBeenCalled();
+    expect(captureSpy).toHaveBeenCalledTimes(1);
+    const featureCall = matchImage.mock.calls.find(call => call[0].method === 'feature');
+    expect(featureCall?.[0].template).toBe(context.toString('base64'));
+    expect(featureCall?.[0].searchArea).toBe(search.toString('base64'));
+    expect(featureCall?.[0].maxBudgetMs).toBeGreaterThanOrEqual(80);
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
