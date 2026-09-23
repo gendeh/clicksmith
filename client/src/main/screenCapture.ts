@@ -81,17 +81,47 @@ export async function captureRegion(region: CaptureRegion): Promise<Buffer> {
 
   const left = requestX;
   const top = requestY;
-  const right = requestX + requestWidth;
-  const bottom = requestY + requestHeight;
-  const safeX = Math.max(0, Math.min(maxWidth - 1, left));
-  const safeY = Math.max(0, Math.min(maxHeight - 1, top));
-  const safeRight = Math.max(safeX + 1, Math.min(maxWidth, right));
-  const safeBottom = Math.max(safeY + 1, Math.min(maxHeight, bottom));
-  const safeWidth = Math.max(1, safeRight - safeX);
-  const safeHeight = Math.max(1, safeBottom - safeY);
+  const right = left + requestWidth;
+  const bottom = top + requestHeight;
+  const extractLeft = Math.max(0, Math.min(maxWidth, left));
+  const extractTop = Math.max(0, Math.min(maxHeight, top));
+  const extractRight = Math.max(extractLeft, Math.min(maxWidth, right));
+  const extractBottom = Math.max(extractTop, Math.min(maxHeight, bottom));
+  const extractWidth = extractRight - extractLeft;
+  const extractHeight = extractBottom - extractTop;
+  const placeLeft = Math.max(0, -left);
+  const placeTop = Math.max(0, -top);
 
-  return sharp(screen)
-    .extract({ left: safeX, top: safeY, width: safeWidth, height: safeHeight })
+  if (extractWidth < 1 || extractHeight < 1) {
+    return sharp({
+      create: {
+        width: requestWidth,
+        height: requestHeight,
+        channels: 3,
+        background: { r: 0, g: 0, b: 0 },
+      },
+    })
+      .png()
+      .toBuffer();
+  }
+
+  const cropped = await sharp(screen)
+    .extract({ left: extractLeft, top: extractTop, width: extractWidth, height: extractHeight })
+    .png()
+    .toBuffer();
+  if (placeLeft === 0 && placeTop === 0 && extractWidth === requestWidth && extractHeight === requestHeight) {
+    return cropped;
+  }
+
+  return sharp({
+    create: {
+      width: requestWidth,
+      height: requestHeight,
+      channels: 3,
+      background: { r: 0, g: 0, b: 0 },
+    },
+  })
+    .composite([{ input: cropped, left: placeLeft, top: placeTop }])
     .png()
     .toBuffer();
 }
