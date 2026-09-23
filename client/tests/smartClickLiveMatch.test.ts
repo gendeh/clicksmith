@@ -1730,6 +1730,126 @@ liveMatch('a re-rendered 70% button clicks its center', async () => {
   }
 }, 20000);
 
+liveMatch('a re-rendered Sunflower among similar buttons clicks Sunflower', async () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const serviceDir = '/Users/Shared/OpenClaw_Shared/Git/clicksmith-smartclick-c741/image-service';
+  const python = '/Users/Shared/OpenClaw_Shared/Git/clicksmith/image-service/.venv/bin/python';
+  const raw = execFileSync(
+    python,
+    [
+      '-c',
+      [
+        'import json, os, sys',
+        'import cv2, numpy as np',
+        `sys.path.insert(0, ${JSON.stringify(serviceDir)})`,
+        `os.chdir(${JSON.stringify(serviceDir)})`,
+        'from tests.test_match import to_base64',
+        'def button(scale, label, fill):',
+        '    width = max(2, int(220 * scale))',
+        '    height = max(2, int(48 * scale))',
+        '    image = np.full((height, width, 3), fill, dtype=np.uint8)',
+        '    cv2.rectangle(image, (1, 1), (width - 2, height - 2), (17, 24, 39), 2)',
+        '    cv2.putText(image, label, (8, max(12, int(32 * scale))), cv2.FONT_HERSHEY_SIMPLEX, max(0.3, 0.7 * scale), (20, 20, 20), max(1, int(2 * scale)), cv2.LINE_AA)',
+        '    return image',
+        'fills = {"A": ((199, 243, 254), "Target A: Sunflower"), "B": ((229, 250, 209), "Target B: Mint"), "C": ((254, 234, 219), "Target C: Ocean"), "D": ((226, 226, 254), "Target D: Coral")}',
+        'template = button(1.0, fills["A"][1], fills["A"][0])',
+        'search = np.full((600, 800, 3), 245, dtype=np.uint8)',
+        'spots = {"A": (40, 110), "B": (280, 110), "C": (520, 110), "D": (40, 280)}',
+        'centers = {}',
+        'for key, (x, y) in spots.items():',
+        '    img = button(0.7, fills[key][1], fills[key][0])',
+        '    h, w = img.shape[:2]',
+        '    search[y:y + h, x:x + w] = img',
+        '    centers[key] = [x + w / 2.0, y + h / 2.0]',
+        'print(json.dumps({"template": to_base64(template), "search": to_base64(search), "centers": centers}))',
+      ].join('\n'),
+    ],
+    { encoding: 'utf8' }
+  );
+  const fixture = JSON.parse(raw) as {
+    template: string;
+    search: string;
+    centers: { A: [number, number]; B: [number, number] };
+  };
+  const patch = Buffer.from(fixture.template, 'base64');
+  const search = Buffer.from(fixture.search, 'base64');
+  const recordedHash = await computeDHash(patch);
+  const windowOrigin = { x: 120, y: 80 };
+  const windowSize = { width: 800, height: 600 };
+  const recorded = {
+    x: Math.round(windowOrigin.x + windowSize.width * 0.25),
+    y: Math.round(windowOrigin.y + 40),
+  };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: {
+      getTargetBounds: () => ({ ...windowOrigin, ...windowSize }),
+      getTargetBoundsAsync: async () => ({ ...windowOrigin, ...windowSize }),
+    } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-sunflower-0.7',
+    target: 'Terminal',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: true,
+    imageSearchRadius: 160,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0.25,
+      rel_y: 40 / 600,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  const visual = {
+    x: windowOrigin.x + fixture.centers.A[0],
+    y: windowOrigin.y + fixture.centers.A[1],
+  };
+  const mint = {
+    x: windowOrigin.x + fixture.centers.B[0],
+    y: windowOrigin.y + fixture.centers.B[1],
+  };
+  if (Math.abs(result.x - visual.x) > 8 || Math.abs(result.y - visual.y) > 8) {
+    throw new Error(
+      `sunflower click (${result.x}, ${result.y}) visual (${visual.x}, ${visual.y}) mint (${mint.x}, ${mint.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} scale ${status.smartClickLastScale} source ${status.smartClickLastSource} dHash ${status.smartClickLastDHashDistance} elapsed ${elapsed}`
+    );
+  }
+  expect(Math.abs(result.x - mint.x) > 8 || Math.abs(result.y - mint.y) > 8).toBe(true);
+  expect(status.smartClickLastSource).toBe('window');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  if (elapsed >= 460) {
+    throw new Error(`sunflower click took ${elapsed}ms`);
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

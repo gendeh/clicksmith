@@ -93,6 +93,7 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_MAX_HASH_EVALS = 8;
     private static readonly SMART_CLICK_DHASH_MAX_DISTANCE = 32;
     private static readonly SMART_CLICK_DHASH_WEAK_MAX_DISTANCE = 12;
+    private static readonly SMART_CLICK_DHASH_SCALED_WEAK_MAX_DISTANCE = 20;
     private static readonly SMART_CLICK_STRONG_MATCH_CONFIDENCE = 0.92;
     private static readonly SMART_CLICK_COLLECTION_MIN_CONFIDENCE = 0.25;
     private static readonly SMART_CLICK_ADAPTIVE_COLLECTION_MIN_CONFIDENCE = 0.2;
@@ -972,6 +973,17 @@ export class PlaybackEngine extends EventEmitter {
         };
     }
 
+    private getWeakDHashMaxDistance(scale?: number): number {
+        if (
+            Number.isFinite(scale) &&
+            Math.abs(Number(scale) - this.getSmartClickScaleBaseline()) >=
+                PlaybackEngine.SMART_CLICK_HASH_SKIP_SCALE_DELTA
+        ) {
+            return PlaybackEngine.SMART_CLICK_DHASH_SCALED_WEAK_MAX_DISTANCE;
+        }
+        return PlaybackEngine.SMART_CLICK_DHASH_WEAK_MAX_DISTANCE;
+    }
+
     private getAdaptiveDHashMaxDistance(scale?: number): number {
         if (!Number.isFinite(scale)) {
             return PlaybackEngine.SMART_CLICK_DHASH_MAX_DISTANCE;
@@ -1524,29 +1536,29 @@ export class PlaybackEngine extends EventEmitter {
                 distance === null || distance <= maxDistance;
         }
 
-        const [best] = this.rankSmartClickCandidates(
+        const ranked = this.rankSmartClickCandidates(
             viable,
             (a, b) => this.compareSmartClickCandidateFinal(a, b, preferredBounds)
         );
-        if (best.confidence < baseThreshold) {
-            return null;
+        for (const best of ranked) {
+            if (best.confidence < baseThreshold) continue;
+            if (
+                best.method !== 'feature' &&
+                best.confidence < PlaybackEngine.SMART_CLICK_STRONG_MATCH_CONFIDENCE &&
+                typeof best.dhashDistance === 'number' &&
+                best.dhashDistance > this.getWeakDHashMaxDistance(best.scale)
+            ) {
+                continue;
+            }
+            return {
+                coords: best.coords,
+                confidence: best.confidence,
+                dhashDistance: best.dhashDistance ?? undefined,
+                method: best.method,
+                scale: best.scale,
+            };
         }
-        if (
-            best.method !== 'feature' &&
-            best.confidence < PlaybackEngine.SMART_CLICK_STRONG_MATCH_CONFIDENCE &&
-            typeof best.dhashDistance === 'number' &&
-            best.dhashDistance > PlaybackEngine.SMART_CLICK_DHASH_WEAK_MAX_DISTANCE
-        ) {
-            return null;
-        }
-
-        return {
-            coords: best.coords,
-            confidence: best.confidence,
-            dhashDistance: best.dhashDistance ?? undefined,
-            method: best.method,
-            scale: best.scale,
-        };
+        return null;
     }
 
     private setSmartClickAnchor(expected: { x: number; y: number }, actual: { x: number; y: number }) {
