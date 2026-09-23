@@ -1621,8 +1621,7 @@ export class PlaybackEngine extends EventEmitter {
             }
 
             if (!timedOut()) {
-                const anchoredExpected = this.applySmartClickAnchor(expected);
-                const searchCenter = relativeFallback ?? anchoredExpected;
+                const searchCenter = fallbackCoords;
                 const rawRegion = {
                     x: searchCenter.x - searchRadius,
                     y: searchCenter.y - searchRadius,
