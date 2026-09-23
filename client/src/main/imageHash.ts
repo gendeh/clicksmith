@@ -1,11 +1,21 @@
 import crypto from 'crypto';
-import sharp from 'sharp';
+
+let sharpLib: any = null;
+
+function getSharpLib() {
+  if (!sharpLib) {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    sharpLib = require('sharp');
+  }
+  return sharpLib;
+}
 
 export function computeSha256(buffer: Buffer): string {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
 export async function computeDHash(buffer: Buffer): Promise<string> {
+  const sharp = getSharpLib();
   const resized = await sharp(buffer)
     .grayscale()
     .resize(9, 8, { fit: 'fill' })
