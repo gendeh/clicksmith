@@ -524,12 +524,13 @@ export class PlaybackEngine extends EventEmitter {
 
         const inflight = this.smartClickPromises.get(index);
         if (inflight) {
-            return this.finishSmartClickWait(inflight, expected, this.smartClickTelemetry.get(index));
+            return this.finishSmartClickWait(inflight, event, expected, this.smartClickTelemetry.get(index));
         }
 
         const telemetry = { open: true };
         return this.finishSmartClickWait(
             this.resolveSmartClick(event, expected, true, telemetry),
+            event,
             expected,
             telemetry
         );
@@ -537,6 +538,7 @@ export class PlaybackEngine extends EventEmitter {
 
     private async finishSmartClickWait(
         work: Promise<{ x: number; y: number }>,
+        event: RecordedEvent,
         expected: { x: number; y: number },
         telemetry?: { open: boolean }
     ): Promise<{ x: number; y: number }> {
@@ -555,13 +557,20 @@ export class PlaybackEngine extends EventEmitter {
             if (telemetry) telemetry.open = false;
             this.status = { ...this.status, retries: this.status.retries + 1 };
             this.degradeSmartClickAnchor();
-            return this.useSmartClickFallback(expected);
+            return this.useSmartClickFallback(this.liveFallbackPoint(event, expected));
         } catch {
             this.degradeSmartClickAnchor();
-            return this.useSmartClickFallback(expected);
+            return this.useSmartClickFallback(this.liveFallbackPoint(event, expected));
         } finally {
             if (timer) this.clock.clearTimeout(timer);
         }
+    }
+
+    private liveFallbackPoint(
+        event: RecordedEvent,
+        expected: { x: number; y: number }
+    ): { x: number; y: number } {
+        return this.relativeFallbackPoint(event, this.smartClickAttemptBounds) ?? expected;
     }
 
     private useSmartClickFallback(expected: { x: number; y: number }): { x: number; y: number } {

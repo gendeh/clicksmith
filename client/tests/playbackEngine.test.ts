@@ -2181,4 +2181,56 @@ describe('PlaybackEngine', () => {
     expect(engine.getStatus().smartClickLastDHashDistance).toBeUndefined();
     jest.useRealTimers();
   });
+
+  test('a timed-out match clicks the relative point in the live window', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: () => new Promise(() => {}),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({ x: 800, y: 100, width: 800, height: 600 }), 190);
+          }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: 40,
+      y: 30,
+      rel_x: 0.05,
+      rel_y: 0.05,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: Buffer.from('template').toString('base64'),
+    };
+    const stale = { x: 540, y: 230 };
+    const inflight = engine.resolveSmartClick(event, stale);
+    engine.smartClickPromises.set(0, inflight);
+    engine.smartClickTelemetry.set(0, { open: true });
+    const pending = engine.getSmartClickCoords(0, event, stale);
+    await jest.advanceTimersByTimeAsync(460);
+    await expect(pending).resolves.toEqual({ x: 840, y: 130 });
+    expect(engine.getStatus().smartClickLastSource).toBe('expected_fallback');
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+    jest.useRealTimers();
+  });
 });
