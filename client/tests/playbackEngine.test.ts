@@ -679,6 +679,68 @@ describe('PlaybackEngine', () => {
     screenSpy.mockRestore();
   });
 
+  test('a screen target clicks the recorded word when the patch is gone', async () => {
+    const regionSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const ocrImage = jest.fn().mockResolvedValue({
+      success: true,
+      processingTimeMs: 12,
+      items: [
+        {
+          text: 'Submit',
+          confidence: 96,
+          bounds: { x: 200, y: 80, width: 80, height: 20 },
+        },
+      ],
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: false,
+          matches: [],
+          bestMatch: null,
+          processingTimeMs: 4,
+        }),
+        ocrImage,
+      } as any,
+      windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'screen',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse' as const,
+        btn: 'left' as const,
+        x: 40,
+        y: 30,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+        metadata: { ocr_primary_text_normalized: 'submit' },
+      },
+      { x: 40, y: 30 }
+    );
+
+    expect(ocrImage).toHaveBeenCalled();
+    expect(result).toEqual({ x: 240, y: 90 });
+    expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
+    expect(engine.getStatus().smartClickLastSource).toBe('fullscreen');
+    regionSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
+
   test('a timed-out SmartClick keeps the anchor offset instead of the old point', async () => {
     jest.useFakeTimers();
     const engine = new PlaybackEngine({

@@ -1893,21 +1893,30 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (!timedOut() && preferredBounds) {
-                const ocrRegion = {
-                    x: Math.max(desktopBounds.x, preferredBounds.x),
-                    y: Math.max(desktopBounds.y, preferredBounds.y),
-                    width: Math.max(
-                        1,
-                        Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
-                            Math.max(desktopBounds.x, preferredBounds.x)
-                    ),
-                    height: Math.max(
-                        1,
-                        Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
-                            Math.max(desktopBounds.y, preferredBounds.y)
-                    ),
-                };
+            const hasRecordedText =
+                this.recordedOcrQuery(event).length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN;
+            if (!timedOut() && (preferredBounds || hasRecordedText)) {
+                const ocrRegion = preferredBounds
+                    ? {
+                          x: Math.max(desktopBounds.x, preferredBounds.x),
+                          y: Math.max(desktopBounds.y, preferredBounds.y),
+                          width: Math.max(
+                              1,
+                              Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
+                                  Math.max(desktopBounds.x, preferredBounds.x)
+                          ),
+                          height: Math.max(
+                              1,
+                              Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
+                                  Math.max(desktopBounds.y, preferredBounds.y)
+                          ),
+                      }
+                    : {
+                          x: desktopBounds.x,
+                          y: desktopBounds.y,
+                          width: Math.max(1, desktopBounds.width),
+                          height: Math.max(1, desktopBounds.height),
+                      };
                 const ocrTimeoutMs = Math.max(budgetLeftMs(), ocrReserveMs);
                 const pickedOcr = ocrTimeoutMs > 0
                     ? await this.tryOcrSmartClickFallback(
@@ -1940,7 +1949,7 @@ export class PlaybackEngine extends EventEmitter {
                         smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
                     };
                     this.markSmartClickSource(
-                        'window',
+                        preferredBounds ? 'window' : 'fullscreen',
                         pickedOcr.method,
                         pickedOcr.confidence,
                         pickedOcr.dhashDistance,
