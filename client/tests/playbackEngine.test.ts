@@ -2152,7 +2152,12 @@ describe('PlaybackEngine', () => {
       inputPlayer: {} as any,
       windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }) } as any,
     }) as any;
-    engine.status = engine.createStatus('playing');
+    engine.status = {
+      ...engine.createStatus('playing'),
+      smartClickLastConfidence: 1,
+      smartClickLastSource: 'window',
+      smartClickLastDHashDistance: 0,
+    };
     engine.smartClickPromises.set(0, new Promise(() => {}));
     engine.smartClickTelemetry.set(0, { open: true });
     const event = {
@@ -2171,6 +2176,9 @@ describe('PlaybackEngine', () => {
     await jest.advanceTimersByTimeAsync(460);
     await expect(pending).resolves.toEqual({ x: 40, y: 30 });
     expect(engine.smartClickTelemetry.get(0).open).toBe(false);
+    expect(engine.getStatus().smartClickLastSource).toBe('expected_fallback');
+    expect(engine.getStatus().smartClickLastConfidence).toBeUndefined();
+    expect(engine.getStatus().smartClickLastDHashDistance).toBeUndefined();
     jest.useRealTimers();
   });
 });

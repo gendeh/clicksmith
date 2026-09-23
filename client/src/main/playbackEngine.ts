@@ -555,13 +555,20 @@ export class PlaybackEngine extends EventEmitter {
             if (telemetry) telemetry.open = false;
             this.status = { ...this.status, retries: this.status.retries + 1 };
             this.degradeSmartClickAnchor();
-            return this.applySmartClickAnchor(expected);
+            return this.useSmartClickFallback(expected);
         } catch {
             this.degradeSmartClickAnchor();
-            return expected;
+            return this.useSmartClickFallback(expected);
         } finally {
             if (timer) this.clock.clearTimeout(timer);
         }
+    }
+
+    private useSmartClickFallback(expected: { x: number; y: number }): { x: number; y: number } {
+        const fallback = this.applySmartClickAnchor(expected);
+        const anchored = fallback.x !== expected.x || fallback.y !== expected.y;
+        this.markSmartClickSource(anchored ? 'anchor_fallback' : 'expected_fallback');
+        return fallback;
     }
 
     private relativeFallbackPoint(
