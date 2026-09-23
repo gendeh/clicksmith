@@ -778,6 +778,31 @@ export class PlaybackEngine extends EventEmitter {
         return overlap / Math.max(aTokens.size, bTokens.size);
     }
 
+    private ocrTokenMatches(pageWord: string, token: string): boolean {
+        if (pageWord === token) return true;
+        if (pageWord.length < 6 || token.length < 6) return false;
+        if (Math.abs(pageWord.length - token.length) > 1) return false;
+        return this.ocrEditDistance(pageWord, token) <= 1;
+    }
+
+    private ocrEditDistance(a: string, b: string): number {
+        const prev = new Array<number>(b.length + 1);
+        const next = new Array<number>(b.length + 1);
+        for (let j = 0; j <= b.length; j += 1) prev[j] = j;
+        for (let i = 1; i <= a.length; i += 1) {
+            next[0] = i;
+            let rowMin = next[0];
+            for (let j = 1; j <= b.length; j += 1) {
+                const cost = a.charCodeAt(i - 1) === b.charCodeAt(j - 1) ? 0 : 1;
+                next[j] = Math.min(prev[j] + 1, next[j - 1] + 1, prev[j - 1] + cost);
+                if (next[j] < rowMin) rowMin = next[j];
+            }
+            if (rowMin > 1) return 2;
+            for (let j = 0; j <= b.length; j += 1) prev[j] = next[j];
+        }
+        return prev[b.length];
+    }
+
     private recordedOcrQuery(event: RecordedEvent): string {
         const metadata = event.metadata as Record<string, unknown> | undefined;
         if (typeof metadata?.ocr_primary_text_normalized === 'string') {
@@ -812,18 +837,21 @@ export class PlaybackEngine extends EventEmitter {
         if (!response.success || !response.items?.length) {
             return null;
         }
-        const phraseTokens = new Set(
-            rawText.split(' ').filter(token => token.length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN)
-        );
+        const phraseTokens = rawText
+            .split(' ')
+            .filter(token => token.length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN);
         const wordCounts = new Map<string, number>();
-        const wordChoices: Array<{ text: string; item: (typeof response.items)[number] }> = [];
+        const pageWords: Array<{ text: string; item: (typeof response.items)[number] }> = [];
         for (const item of response.items) {
             const candidateText = this.normalizeOcrText(item.text);
             if (!candidateText || candidateText.includes(' ') || candidateText === rawText) continue;
-            if (!phraseTokens.has(candidateText)) continue;
+            if (candidateText.length < PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN) continue;
             wordCounts.set(candidateText, (wordCounts.get(candidateText) ?? 0) + 1);
-            wordChoices.push({ text: candidateText, item });
+            pageWords.push({ text: candidateText, item });
         }
+        const wordChoices = pageWords.filter(choice =>
+            phraseTokens.some(token => this.ocrTokenMatches(choice.text, token))
+        );
         let bestWord: SmartClickCandidateSelection | null = null;
         let bestWordRank: [number, number, number] | null = null;
         for (const choice of wordChoices) {

@@ -640,6 +640,44 @@ describe('PlaybackEngine', () => {
     expect(sunflower?.method).toBe('ocr');
     expect(sunflower?.coords).toEqual({ x: 329, y: 215 });
     expect(coral?.coords).toEqual({ x: 309, y: 385 });
+    const clipped = await engine.tryOcrSmartClickFallback(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 0,
+        y: 0,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        metadata: { ocr_primary_text_normalized: 'target a sunflowe targ' },
+      },
+      { x: 120, y: 80, width: 800, height: 600 },
+      { x: 320, y: 120 },
+      0.6,
+      400
+    );
+    const mint = await engine.tryOcrSmartClickFallback(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 0,
+        y: 0,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        metadata: { ocr_primary_text_normalized: 'flowe target b mint targ' },
+      },
+      { x: 120, y: 80, width: 800, height: 600 },
+      { x: 320, y: 120 },
+      0.6,
+      400
+    );
+    expect(clipped?.coords).toEqual({ x: 329, y: 215 });
+    expect(mint?.coords).toEqual({ x: 543, y: 215 });
     captureSpy.mockRestore();
   });
 
