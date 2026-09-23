@@ -2004,4 +2004,58 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     jest.useRealTimers();
   });
+
+  test('playback start uses a live window that arrives after 160ms', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const moves: Array<{ x: number; y: number }> = [];
+    const engine = new PlaybackEngine({
+      inputPlayer: {
+        moveMouse: (x: number, y: number) => moves.push({ x, y }),
+        mouseDown: () => undefined,
+        mouseUp: () => undefined,
+        keyDown: () => undefined,
+        keyUp: () => undefined,
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({ x: 800, y: 100, width: 800, height: 600 }), 180);
+          }),
+      } as any,
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      target_app: 'Terminal',
+      events: [
+        {
+          t_ms: 0,
+          type: 'mouse',
+          btn: 'left',
+          x: 40,
+          y: 30,
+          rel_x: 0.05,
+          rel_y: 0.05,
+          duration_ms: 0,
+          human_override: false,
+        },
+      ],
+    };
+    const startPromise = engine.start(
+      {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: false,
+        useRelativeCoords: true,
+      },
+      profile
+    );
+    await jest.advanceTimersByTimeAsync(200);
+    await startPromise;
+    await jest.advanceTimersByTimeAsync(50);
+    expect(moves[0]).toEqual({ x: 840, y: 130 });
+    await engine.stop();
+    jest.useRealTimers();
+  });
 });

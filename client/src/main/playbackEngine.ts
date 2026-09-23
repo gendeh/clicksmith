@@ -181,16 +181,24 @@ export class PlaybackEngine extends EventEmitter {
         this.smartClickConsecutiveFailures = 0;
         this.smartClickAdaptationReason = null;
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
+        let boundsTimer: NodeJS.Timeout | null = null;
         try {
             const asyncBounds = await Promise.race([
                 this.windowManager.getTargetBoundsAsync(config.target),
-                new Promise<WindowBounds | null>((resolve) => setTimeout(() => resolve(null), 160)),
+                new Promise<WindowBounds | null>((resolve) => {
+                    boundsTimer = this.clock.setTimeout(
+                        () => resolve(null),
+                        PlaybackEngine.SMART_CLICK_BOUNDS_WAIT_MS
+                    );
+                }),
             ]);
             if (asyncBounds) {
                 this.targetBounds = asyncBounds;
             }
         } catch {
             // keep sync fallback bounds
+        } finally {
+            if (boundsTimer) this.clock.clearTimeout(boundsTimer);
         }
         this.status = this.createStatus('playing');
         this.emit('status', this.status);
