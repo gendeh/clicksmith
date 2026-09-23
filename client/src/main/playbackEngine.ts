@@ -1715,7 +1715,9 @@ export class PlaybackEngine extends EventEmitter {
                 const region = clipNeighborhood(searchCenter, searchRadius);
                 const searchArea = await captureForMatch(() => captureRegion(region));
                 nearbyCapture = { image: searchArea, region };
-                const regionBudget = Math.min(stageBudgetMs('region'), imageBudgetLeftMs());
+                const regionBudget = preferredBounds
+                    ? Math.min(stageBudgetMs('region'), imageBudgetLeftMs())
+                    : imageBudgetLeftMs();
                 const regionResponse = await this.imageService.matchImage({
                     template: templateForMatch,
                     templateHash,

@@ -387,6 +387,108 @@ liveMatch('a screen target clicks the recorded word inside the search radius', a
   }
 }, 20000);
 
+liveMatch('a screen target clicks a patch that moved inside the search radius', async () => {
+  const { execFile } = require('child_process') as typeof import('child_process');
+  const fs = require('fs') as typeof import('fs');
+  const os = require('os') as typeof import('os');
+  const path = require('path') as typeof import('path');
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+
+  const origin = { x: 400, y: 300 };
+  const size = 640;
+  const patchOrigin = { x: 220, y: 180 };
+  const patchSize = 96;
+  const file = path.join(os.tmpdir(), `sc-screen-move-${process.pid}.png`);
+  const arg = `${origin.x},${origin.y},${size},${size}`;
+  const captureStarted = Date.now();
+  await new Promise<void>((resolve, reject) => {
+    execFile('screencapture', ['-x', '-R', arg, file], error => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+  const captureMs = Date.now() - captureStarted;
+  const native = await fs.promises.readFile(file);
+  await fs.promises.unlink(file).catch(() => undefined);
+  const logical = await sharp(native).resize(size, size, { fit: 'fill' }).png().toBuffer();
+  const patch = await sharp(logical)
+    .extract({ left: patchOrigin.x, top: patchOrigin.y, width: patchSize, height: patchSize })
+    .png()
+    .toBuffer();
+  const recordedHash = await computeDHash(patch);
+  const recorded = { x: origin.x + size / 2, y: origin.y + size / 2 };
+  const visual = {
+    x: origin.x + patchOrigin.x + patchSize / 2,
+    y: origin.y + patchOrigin.y + patchSize / 2,
+  };
+
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockImplementation(async (region) => {
+    if (region.width > size || region.height > size) {
+      throw new Error(`desktop capture ${region.width}x${region.height}`);
+    }
+    return logical;
+  });
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: { getTargetBounds: () => null, getTargetBoundsAsync: async () => null } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-screen-move',
+    target: 'screen',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 320,
+  };
+  engine.status = engine.createStatus('playing');
+  const started = Date.now();
+  const result = await engine.resolveSmartClick(
+    {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: recorded.x,
+      y: recorded.y,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash, recorded_match_scale: 1 },
+    },
+    recorded
+  );
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  expect(screenSpy).not.toHaveBeenCalled();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+
+  expect(status.smartClickLastSource).toBe('region');
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(result.x).toBeGreaterThanOrEqual(visual.x - 8);
+  expect(result.x).toBeLessThanOrEqual(visual.x + 8);
+  expect(result.y).toBeGreaterThanOrEqual(visual.y - 8);
+  expect(result.y).toBeLessThanOrEqual(visual.y + 8);
+  expect(result).not.toEqual(recorded);
+  if (captureMs + elapsed >= 460) {
+    throw new Error(
+      `capture ${captureMs}ms + match ${elapsed}ms = ${captureMs + elapsed}ms click (${result.x}, ${result.y}) recorded (${recorded.x}, ${recorded.y})`
+    );
+  }
+}, 20000);
+
 liveMatch('a real oversized screen capture clicks the cropped patch', async () => {
   const { execFile } = require('child_process') as typeof import('child_process');
   const fs = require('fs') as typeof import('fs');

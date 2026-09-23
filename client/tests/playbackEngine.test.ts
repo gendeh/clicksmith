@@ -675,6 +675,7 @@ describe('PlaybackEngine', () => {
 
     expect(result).toEqual({ x: far.x, y: far.y });
     expect(result).not.toEqual(recorded);
+    expect(matchImage.mock.calls[0][0].maxBudgetMs).toBe(260);
     regionSpy.mockRestore();
     screenSpy.mockRestore();
   });
