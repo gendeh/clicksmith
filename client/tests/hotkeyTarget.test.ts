@@ -1,3 +1,5 @@
+import fs from 'fs';
+import path from 'path';
 import { hotkeyTarget } from '../src/main/hotkeyTarget';
 
 describe('hotkeyTarget', () => {
@@ -17,5 +19,15 @@ describe('hotkeyTarget', () => {
   test('defaults to screen', () => {
     expect(hotkeyTarget(null, null)).toBe('screen');
     expect(hotkeyTarget('', '')).toBe('screen');
+  });
+
+  test('an unsaved replay follows the UI target', () => {
+    const source = fs.readFileSync(path.join(__dirname, '../src/main/main.ts'), 'utf8');
+    const start = source.indexOf('draftQuickReplayPending ? lastDraftProfile');
+    const end = source.indexOf('let profileId = lastProfileId', start);
+    const draftReplay = source.slice(start, end);
+    expect(draftReplay).toContain('hotkeyTarget(selectedUiTarget, draftProfile.target_app)');
+    expect(draftReplay).toContain('target: playTarget');
+    expect(draftReplay).not.toContain('target: draftProfile.target_app');
   });
 });

@@ -1851,6 +1851,7 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     if (draftProfile) {
       draftQuickReplayPending = false;
       lastPlaybackProfile = draftProfile;
+      const playTarget = hotkeyTarget(selectedUiTarget, draftProfile.target_app);
       lastPlaybackTarget = draftProfile.target_app;
       const useModAdapterForThisRun =
         adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(draftProfile.target_app));
@@ -1868,10 +1869,11 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
         );
         return;
       }
+      lastPlaybackTarget = playTarget;
       const runtime = buildRuntimePlaybackProfile(draftProfile);
       lastPlaybackLeadInMs = runtime.leadInMs;
       const result = await playbackEngine.start(
-        buildPlaybackConfig({ profileId: draftProfile.id, target: draftProfile.target_app }),
+        buildPlaybackConfig({ profileId: draftProfile.id, target: playTarget }),
         runtime.profile
       );
       if (result.success && shouldAutoTakeover()) {
