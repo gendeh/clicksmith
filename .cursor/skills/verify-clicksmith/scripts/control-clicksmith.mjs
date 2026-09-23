@@ -20,6 +20,7 @@ Commands:
   cleanup
   http GET|POST|PUT|DELETE <url> [--body JSON]
   drive manager-controls [--headed]
+  drive geode-freeze
   screenshot --path <file>
 `);
 }
@@ -327,6 +328,13 @@ try {
     await http(rest[0], rest[1], args.body);
   } else if (command === 'drive' && rest[0] === 'manager-controls') {
     await driveManagerControls(Boolean(args.headed));
+  } else if (command === 'drive' && rest[0] === 'geode-freeze') {
+    const { spawnSync } = await import('node:child_process');
+    const result = spawnSync('node', [join(repoRoot, 'scripts/verify-geode-freeze-ticks.js')], {
+      stdio: 'inherit',
+      env: process.env,
+    });
+    process.exit(result.status ?? 1);
   } else if (command === 'screenshot') {
     if (!args.path) throw new Error('--path is required');
     await screenshot(args.path);

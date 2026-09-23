@@ -21,9 +21,10 @@ Preconditions:
 - Lane `game`. `curl http://127.0.0.1:27737/status` returns `ok`.
 - Cloud Agents: **SKIP game**.
 
-- **Status.** GET `http://127.0.0.1:27737/status`. Payload passes `validateModStatusPayload`.
-- **Record.** Start recording from the manager with GD targeted. Adapter `record_state` becomes `armed` then `live`. Stop. Save-run modal has events with `metadata.source === "geode"`.
-- **Proof.** Status JSON plus the saved profile events. A disconnected adapter card is not this feature.
+- **Status.** GET `http://127.0.0.1:27737/status`. Payload passes `validateModStatusPayload`. `protocol_version` must equal checkout `2.0.0`.
+- **Record.** Start recording from the manager with GD targeted. Adapter `record_state` becomes `armed` then `live`. Stop. Save-run modal has events with `metadata.source === "geode"` and `metadata.t_tick`.
+- **Replay freeze tick.** `npm run verify:geode-freeze` or `control-clicksmith drive geode-freeze`. Same fixture, at least 8 macro deaths, spread `0`. Writes `.cursor/skills/verify-clicksmith/artifacts/geode-timing/verify-runs.json`.
+- **Proof.** Status JSON plus the saved profile events, or the freeze-tick table. A disconnected adapter card is not this feature. Cloud Agents print `SKIP game` and `curl -sS -m 3 http://127.0.0.1:27737/status`.
 
 ## Gotchas
 
