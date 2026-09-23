@@ -1908,7 +1908,7 @@ export class PlaybackEngine extends EventEmitter {
                             Math.max(desktopBounds.y, preferredBounds.y)
                     ),
                 };
-                const ocrTimeoutMs = budgetLeftMs();
+                const ocrTimeoutMs = Math.max(budgetLeftMs(), ocrReserveMs);
                 const pickedOcr = ocrTimeoutMs > 0
                     ? await this.tryOcrSmartClickFallback(
                           event,

@@ -8,6 +8,7 @@ type CachedMatch = {
 };
 
 const CACHE_TTL_MS = 1_500;
+const OCR_RESPONSE_GRACE_MS = 40;
 const CACHE_LIMIT = 128;
 const IMAGE_HASH_CACHE_LIMIT = 256;
 const IMAGE_HASH_CACHE_MAX_CHARS = 750_000;
@@ -85,12 +86,13 @@ export class ImageService {
   public async ocrImage(request: ImageOcrRequest): Promise<ImageOcrResponse> {
     const started = Date.now();
     const fitted = await fitOcrImage(request.image);
-    const elapsed = Date.now() - started;
+    const elapsed = fitted.coordinateScale === 1 ? 0 : Date.now() - started;
     const budget = Math.max(0, Math.min(3000, request.timeoutMs ?? 900));
-    const timeoutMs = Math.max(0, budget - elapsed);
-    const fittedRequest: ImageOcrRequest = { ...request, image: fitted.image, timeoutMs };
+    const serverBudgetMs = Math.max(0, budget - elapsed);
+    const fittedRequest: ImageOcrRequest = { ...request, image: fitted.image, timeoutMs: serverBudgetMs };
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    const abortMs = serverBudgetMs === 0 ? 0 : serverBudgetMs + OCR_RESPONSE_GRACE_MS;
+    const timeout = setTimeout(() => controller.abort(), abortMs);
     try {
       const response = await fetch(`${this.endpoint}/ocr`, {
         method: 'POST',

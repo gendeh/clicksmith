@@ -45,7 +45,7 @@ describe('ImageService budgets', () => {
     await expect(pending).resolves.toMatchObject({ success: false });
   });
 
-  test('an 80ms text budget aborts at 80ms', async () => {
+  test('an 80ms text budget waits for the response, then aborts', async () => {
     jest.useFakeTimers();
     global.fetch = jest.fn((_url: unknown, init?: RequestInit) => hangUntilAbort(init)) as typeof fetch;
     const service = new ImageService('http://127.0.0.1:5001');
@@ -56,6 +56,8 @@ describe('ImageService budgets', () => {
     });
 
     await jest.advanceTimersByTimeAsync(80);
+    expect(settled).toBe(false);
+    await jest.advanceTimersByTimeAsync(40);
     expect(settled).toBe(true);
     await expect(pending).resolves.toMatchObject({ success: false });
   });

@@ -1832,9 +1832,83 @@ describe('PlaybackEngine', () => {
     expect(matchImage.mock.calls[0][0].maxBudgetMs).toBe(140);
     expect(matchImage.mock.calls[0][0].timeoutMs).toBe(140);
     expect(ocrImage).toHaveBeenCalledTimes(1);
+    expect(ocrImage.mock.calls[0][0].timeoutMs).toBeGreaterThanOrEqual(120);
     expect(result).toEqual({ x: 600, y: 230 });
     expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
     expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
+
+  test('a template miss that overruns the image cap still gives the word its reserve', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    let now = 0;
+    const matchImage = jest.fn(async () => {
+      now += 180;
+      return {
+        success: false,
+        matches: [],
+        bestMatch: null,
+        processingTimeMs: 180,
+        error: 'The operation was aborted',
+      };
+    });
+    const ocrImage = jest.fn().mockResolvedValue({
+      success: true,
+      processingTimeMs: 90,
+      items: [
+        {
+          text: 'Submit',
+          confidence: 96,
+          bounds: { x: 40, y: 30, width: 80, height: 20 },
+        },
+      ],
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: { matchImage, ocrImage } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+      } as any,
+      clock: {
+        now: () => now,
+        setTimeout: (handler: () => void, timeout: number) => setTimeout(handler, timeout),
+        clearTimeout: (handle: ReturnType<typeof setTimeout>) => clearTimeout(handle),
+      },
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse' as const,
+        btn: 'left' as const,
+        x: 40,
+        y: 30,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+        metadata: { ocr_primary_text_normalized: 'submit' },
+      },
+      { x: 40, y: 30 }
+    );
+
+    expect(ocrImage).toHaveBeenCalledTimes(1);
+    expect(ocrImage.mock.calls[0][0].timeoutMs).toBeGreaterThanOrEqual(120);
+    expect(result).toEqual({ x: 580, y: 240 });
+    expect(engine.getStatus().smartClickLastMethod).toBe('ocr');
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
@@ -2345,13 +2419,13 @@ describe('PlaybackEngine', () => {
               90
             );
           }),
-        ocrImage: (request: { timeoutMs?: number }) =>
+        ocrImage: (_request: { timeoutMs?: number }) =>
           new Promise((resolve) => {
             setTimeout(
               () =>
                 resolve({
                   success: true,
-                  processingTimeMs: request.timeoutMs,
+                  processingTimeMs: 80,
                   items: [
                     {
                       text: 'Submit',
@@ -2360,7 +2434,7 @@ describe('PlaybackEngine', () => {
                     },
                   ],
                 }),
-              request.timeoutMs ?? 120
+              80
             );
           }),
       } as any,

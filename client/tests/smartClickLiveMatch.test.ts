@@ -1,6 +1,7 @@
 import { PlaybackEngine } from '../src/main/playbackEngine';
 import { RecordingEngine } from '../src/main/recordingEngine';
 import { ImageService } from '../src/services/imageService';
+import { formatSmartClickStatsLine } from '../src/services/smartClickStats';
 import * as screenCapture from '../src/main/screenCapture';
 import { computeDHash } from '../src/main/imageHash';
 import { MockInputHook } from '../src/main/inputHooks';
@@ -108,6 +109,11 @@ liveMatch('a live match in a moved window clicks the patch center at 70%, 100%, 
     const status = engine.getStatus();
     expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
     expect(status.smartClickLastSource).toBe('window');
+    expect(status.smartClickLastScale).toBeGreaterThanOrEqual(scale - 0.08);
+    expect(status.smartClickLastScale).toBeLessThanOrEqual(scale + 0.08);
+    expect(formatSmartClickStatsLine(status)).toContain(
+      `scale ${Number(status.smartClickLastScale).toFixed(2)}`
+    );
     if (scale === 1) {
       expect(status.smartClickLastDHashDistance).toBeLessThanOrEqual(8);
     }
@@ -180,6 +186,8 @@ liveMatch('a live template miss still clicks the recorded word', async () => {
   expect(status.smartClickLastMethod).toBe('ocr');
   expect(status.smartClickLastSource).toBe('window');
   expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(status.smartClickLastScale).toBeUndefined();
+  expect(formatSmartClickStatsLine(status)).toContain('scale n/a');
   expect(result).not.toEqual({ x: 40, y: 30 });
   expect(result.x).toBeGreaterThanOrEqual(windowOrigin.x + 40);
   expect(result.x).toBeLessThanOrEqual(windowOrigin.x + 320);
