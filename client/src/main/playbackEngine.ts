@@ -1172,25 +1172,42 @@ export class PlaybackEngine extends EventEmitter {
             .toBuffer();
     }
 
+    private async recordedPatchSize(event: RecordedEvent): Promise<number> {
+        const encoded = event.img_patch_b64;
+        if (!encoded) return 128;
+        try {
+            const metadata = await this.getSharp()(Buffer.from(encoded, 'base64')).metadata();
+            const width = metadata.width ?? 0;
+            const height = metadata.height ?? 0;
+            const edge = Math.min(width, height);
+            if (!Number.isFinite(edge) || edge < 8) return 128;
+            return Math.round(edge);
+        } catch {
+            return 128;
+        }
+    }
+
     private async getDHashDistance(
         event: RecordedEvent,
         x: number,
         y: number,
-        hashSource?: { image: Buffer; offsetX: number; offsetY: number }
+        hashSource?: { image: Buffer; offsetX: number; offsetY: number },
+        patchSize = 128
     ): Promise<number | null> {
         const recordedHash = (event.metadata as Record<string, unknown> | undefined)?.img_dhash;
         if (typeof recordedHash !== 'string' || !recordedHash) {
             return null;
         }
+        const size = Math.max(8, Math.round(patchSize));
         try {
             const patch = hashSource
                 ? await this.extractPatchFromBuffer(
                       hashSource.image,
                       Math.round(x - hashSource.offsetX),
                       Math.round(y - hashSource.offsetY),
-                      128
+                      size
                   )
-                : await capturePatch(Math.round(x), Math.round(y), 128);
+                : await capturePatch(Math.round(x), Math.round(y), size);
             const currentHash = await computeDHash(patch);
             return this.hammingDistanceHex(recordedHash, currentHash);
         } catch {
@@ -1376,6 +1393,11 @@ export class PlaybackEngine extends EventEmitter {
         );
 
         const hashEvalCount = Math.min(PlaybackEngine.SMART_CLICK_MAX_HASH_EVALS, viable.length);
+        const recordedHash = (event.metadata as Record<string, unknown> | undefined)?.img_dhash;
+        const patchSize =
+            typeof recordedHash === 'string' && recordedHash
+                ? await this.recordedPatchSize(event)
+                : 128;
         for (let i = 0; i < hashEvalCount; i += 1) {
             const candidate = preHashRanked[i];
             if (adaptationMode && candidate.method === 'feature') {
@@ -1389,7 +1411,13 @@ export class PlaybackEngine extends EventEmitter {
                 candidate.passesHashGate = true;
                 continue;
             }
-            const distance = await this.getDHashDistance(event, candidate.coords.x, candidate.coords.y, hashSource);
+            const distance = await this.getDHashDistance(
+                event,
+                candidate.coords.x,
+                candidate.coords.y,
+                hashSource,
+                patchSize
+            );
             candidate.dhashDistance = distance;
             const maxDistance = this.getAdaptiveDHashMaxDistance(candidate.scale);
             candidate.passesHashGate =

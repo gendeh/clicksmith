@@ -2661,4 +2661,141 @@ describe('PlaybackEngine', () => {
     expect(moves[0]).toEqual({ x: 840, y: 130 });
     jest.useRealTimers();
   });
+
+  test('a repeating patch keeps the click on the recorded point', async () => {
+    const sharp = require('sharp');
+    const fs = require('fs');
+    const path = require('path');
+    const windowPng = fs.readFileSync(path.join(__dirname, 'fixtures/periodic-window.png'));
+    const patch = await sharp(windowPng).extract({ left: 48, top: 40, width: 96, height: 96 }).png().toBuffer();
+    const recordedHash = await computeDHash(patch);
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(windowPng);
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(windowPng);
+    const truth = {
+      x: 96,
+      y: 88,
+      confidence: 1,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 48, y: 40, width: 96, height: 96 },
+    };
+    const decoy = {
+      x: 266,
+      y: 198,
+      confidence: 0.85,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 218, y: 150, width: 96, height: 96 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [truth, decoy],
+          bestMatch: truth,
+          processingTimeMs: 12,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 260, y: 160, width: 400, height: 280 }),
+        getTargetBoundsAsync: async () => ({ x: 260, y: 160, width: 400, height: 280 }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Pattern',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: 196,
+      y: 168,
+      rel_x: 96 / 400,
+      rel_y: 88 / 280,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: patch.toString('base64'),
+      metadata: { img_dhash: recordedHash },
+    };
+
+    const result = await engine.resolveSmartClick(event, { x: 196, y: 168 });
+
+    expect(result).toEqual({ x: 356, y: 248 });
+    expect(engine.getStatus().smartClickLastSource).toBe('window');
+    expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
+
+  test('a 0.66 match on the recorded patch still clicks', async () => {
+    const sharp = require('sharp');
+    const fs = require('fs');
+    const path = require('path');
+    const windowPng = fs.readFileSync(path.join(__dirname, 'fixtures/periodic-window.png'));
+    const patch = await sharp(windowPng).extract({ left: 48, top: 40, width: 96, height: 96 }).png().toBuffer();
+    const recordedHash = await computeDHash(patch);
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(windowPng);
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(windowPng);
+    const truth = {
+      x: 96,
+      y: 88,
+      confidence: 0.66,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 48, y: 40, width: 96, height: 96 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [truth],
+          bestMatch: truth,
+          processingTimeMs: 12,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 260, y: 160, width: 400, height: 280 }),
+        getTargetBoundsAsync: async () => ({ x: 260, y: 160, width: 400, height: 280 }),
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Pattern',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 196,
+        y: 168,
+        rel_x: 96 / 400,
+        rel_y: 88 / 280,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: patch.toString('base64'),
+        metadata: { img_dhash: recordedHash },
+      },
+      { x: 196, y: 168 }
+    );
+
+    expect(result).toEqual({ x: 356, y: 248 });
+    expect(engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.66);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
 });
