@@ -74,7 +74,6 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS = 260;
     private static readonly SMART_CLICK_MAX_BUDGET_MS = 260;
     private static readonly SMART_CLICK_BOUNDS_WAIT_MS = 200;
-    private static readonly SMART_CLICK_BOUNDS_MATCH_RESERVE_MS = 60;
     private static readonly SMART_CLICK_MIN_SCALE = 0.7;
     private static readonly SMART_CLICK_MAX_SCALE = 1.4;
     private static readonly SMART_CLICK_ADAPTIVE_MIN_SCALE = 0.55;
@@ -112,6 +111,7 @@ export class PlaybackEngine extends EventEmitter {
     private smartClickScaleHint: number | null = 1.0;
     private smartClickAdaptationClicksLeft = 0;
     private smartClickLastTargetBounds: WindowBounds | null = null;
+    private smartClickAttemptBounds: WindowBounds | null = null;
     private smartClickConsecutiveFailures = 0;
     private smartClickAdaptationReason: SmartClickAdaptationReason | null = null;
     private sharpLib: any | null = null;
@@ -176,6 +176,7 @@ export class PlaybackEngine extends EventEmitter {
         this.initializeSmartClickScaleState(profile);
         this.smartClickAdaptationClicksLeft = 0;
         this.smartClickLastTargetBounds = null;
+        this.smartClickAttemptBounds = null;
         this.smartClickConsecutiveFailures = 0;
         this.smartClickAdaptationReason = null;
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
@@ -214,6 +215,7 @@ export class PlaybackEngine extends EventEmitter {
         this.smartClickScaleHint = 1.0;
         this.smartClickAdaptationClicksLeft = 0;
         this.smartClickLastTargetBounds = null;
+        this.smartClickAttemptBounds = null;
         this.smartClickConsecutiveFailures = 0;
         this.smartClickAdaptationReason = null;
         this.actions = [];
@@ -320,7 +322,7 @@ export class PlaybackEngine extends EventEmitter {
             : Math.max(0, deadline - this.clock.now());
         const waitMs = Math.min(
             PlaybackEngine.SMART_CLICK_BOUNDS_WAIT_MS,
-            Math.max(0, budgetLeft - PlaybackEngine.SMART_CLICK_BOUNDS_MATCH_RESERVE_MS)
+            budgetLeft
         );
         let timer: NodeJS.Timeout | null = null;
         try {
@@ -544,6 +546,18 @@ export class PlaybackEngine extends EventEmitter {
             this.degradeSmartClickAnchor();
             return expected;
         }
+    }
+
+    private relativeFallbackPoint(
+        event: RecordedEvent,
+        bounds: WindowBounds | null
+    ): { x: number; y: number } | null {
+        if (!bounds || !this.config?.useRelativeCoords) return null;
+        if (!Number.isFinite(event.rel_x) || !Number.isFinite(event.rel_y)) return null;
+        return {
+            x: Math.round(bounds.x + bounds.width * event.rel_x),
+            y: Math.round(bounds.y + bounds.height * event.rel_y),
+        };
     }
 
     private applySmartClickAnchor(expected: { x: number; y: number }) {
@@ -1381,15 +1395,20 @@ export class PlaybackEngine extends EventEmitter {
         // Always match with the primary small patch; context patch is reserved for future reranking.
         const templateForMatch = event.img_patch_b64;
         const templateHash = event.img_hash;
-        const budgetDeadline = deadline ?? this.clock.now() + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
-        const startedAt = budgetDeadline - PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
         const threshold = Math.max(0, Math.min(1, config.imageMatchThreshold));
         const strictThresholdBase = threshold;
         const fullscreenThresholdBase = threshold;
         const desktopBounds = CoordinateNormalizer.getVirtualLogicalBounds();
         const desktopRight = desktopBounds.x + desktopBounds.width;
         const desktopBottom = desktopBounds.y + desktopBounds.height;
-        const preferredBounds = await this.getSmartClickTargetBoundsAsync(budgetDeadline);
+        if (attempt === 0) {
+            this.smartClickAttemptBounds = await this.getSmartClickTargetBoundsAsync(
+                this.clock.now() + PlaybackEngine.SMART_CLICK_BOUNDS_WAIT_MS
+            );
+        }
+        const preferredBounds = this.smartClickAttemptBounds;
+        const budgetDeadline = deadline ?? this.clock.now() + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
+        const startedAt = budgetDeadline - PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
         if (preferredBounds) {
             if (this.hasSignificantTargetBoundsChange(preferredBounds)) {
                 this.enterSmartClickAdaptationMode(undefined, 'bounds_change');
@@ -1425,7 +1444,11 @@ export class PlaybackEngine extends EventEmitter {
             return Math.max(20, Math.min(preferred, remainingBudgetMs()));
         };
         const stageTimeoutMs = (stage: SmartClickStage) => Math.max(20, Math.min(requestTimeoutMs, stageBudgetMs(stage)));
-        const fallbackCoords = adaptationMode ? expected : this.applySmartClickAnchor(expected);
+        const relativeFallback = this.relativeFallbackPoint(event, preferredBounds);
+        const anchored = this.applySmartClickAnchor(expected);
+        const anchorHolds =
+            !adaptationMode && (anchored.x !== expected.x || anchored.y !== expected.y);
+        const fallbackCoords = anchorHolds ? anchored : (relativeFallback ?? expected);
         const collectionMinConfidence = adaptationMode
             ? PlaybackEngine.SMART_CLICK_ADAPTIVE_COLLECTION_MIN_CONFIDENCE
             : PlaybackEngine.SMART_CLICK_COLLECTION_MIN_CONFIDENCE;
