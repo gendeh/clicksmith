@@ -435,10 +435,17 @@ def match_feature_multiscale(template, search_area, min_scale, max_scale, scale_
             continue
         chosen = dict(hit)
         chosen["scale"] = float(scale)
-        if best is None or inliers > int(best.get("inliers") or 0):
+        align = abs(reported - 1.0)
+        best_align = float(best.get("_align")) if best is not None else None
+        if best is None or align < best_align - 0.02 or (
+            abs(align - best_align) <= 0.02 and inliers > int(best.get("inliers") or 0)
+        ):
+            chosen["_align"] = align
             best = chosen
-        if inliers >= 24 and abs(reported - 1.0) <= 0.04:
+        if inliers >= 24 and align <= 0.02:
             break
+    if best is not None:
+        best.pop("_align", None)
     return best
 
 
