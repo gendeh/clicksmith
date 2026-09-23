@@ -1445,10 +1445,11 @@ export class PlaybackEngine extends EventEmitter {
         };
         const stageTimeoutMs = (stage: SmartClickStage) => Math.max(20, Math.min(requestTimeoutMs, stageBudgetMs(stage)));
         const relativeFallback = this.relativeFallbackPoint(event, preferredBounds);
-        const anchored = this.applySmartClickAnchor(expected);
+        const anchorBase = relativeFallback ?? expected;
+        const anchored = this.applySmartClickAnchor(anchorBase);
         const anchorHolds =
-            !adaptationMode && (anchored.x !== expected.x || anchored.y !== expected.y);
-        const fallbackCoords = anchorHolds ? anchored : (relativeFallback ?? expected);
+            !adaptationMode && (anchored.x !== anchorBase.x || anchored.y !== anchorBase.y);
+        const fallbackCoords = anchorHolds ? anchored : anchorBase;
         const collectionMinConfidence = adaptationMode
             ? PlaybackEngine.SMART_CLICK_ADAPTIVE_COLLECTION_MIN_CONFIDENCE
             : PlaybackEngine.SMART_CLICK_COLLECTION_MIN_CONFIDENCE;
@@ -1558,7 +1559,7 @@ export class PlaybackEngine extends EventEmitter {
                         (!adaptationMode || pickedWindow.confidence >= 0.80) &&
                         !this.hasMeaningfulScaleShift(pickedWindow.scale)
                     ) {
-                        this.setSmartClickAnchor(expected, pickedWindow.coords);
+                        this.setSmartClickAnchor(relativeFallback ?? expected, pickedWindow.coords);
                     } else if (this.smartClickAnchor) {
                         this.clearSmartClickAnchor();
                     }
@@ -1667,7 +1668,7 @@ export class PlaybackEngine extends EventEmitter {
                         (!adaptationMode || pickedRegion.confidence >= 0.80) &&
                         !this.hasMeaningfulScaleShift(pickedRegion.scale)
                     ) {
-                        this.setSmartClickAnchor(expected, pickedRegion.coords);
+                        this.setSmartClickAnchor(relativeFallback ?? expected, pickedRegion.coords);
                     } else if (this.smartClickAnchor) {
                         this.clearSmartClickAnchor();
                     }
@@ -1764,7 +1765,7 @@ export class PlaybackEngine extends EventEmitter {
                 if (pickedContext) {
                     if (!telemetry.open) return pickedContext.coords;
                     if (pickedContext.confidence >= 0.82 && !this.hasMeaningfulScaleShift(pickedContext.scale)) {
-                        this.setSmartClickAnchor(expected, pickedContext.coords);
+                        this.setSmartClickAnchor(relativeFallback ?? expected, pickedContext.coords);
                     } else if (this.smartClickAnchor) {
                         this.clearSmartClickAnchor();
                     }
@@ -1929,7 +1930,7 @@ export class PlaybackEngine extends EventEmitter {
                         (!adaptationMode || pickedFullscreen.confidence >= 0.80) &&
                         !this.hasMeaningfulScaleShift(pickedFullscreen.scale)
                     ) {
-                        this.setSmartClickAnchor(expected, pickedFullscreen.coords);
+                        this.setSmartClickAnchor(relativeFallback ?? expected, pickedFullscreen.coords);
                     } else if (this.smartClickAnchor) {
                         this.clearSmartClickAnchor();
                     }

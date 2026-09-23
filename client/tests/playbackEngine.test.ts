@@ -1869,4 +1869,67 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('an anchor learned in a moved window follows the next live window', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    const hit = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    let bounds = { x: 200, y: 80, width: 800, height: 600 };
+    let matchImageCalls = 0;
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: jest.fn(async () => {
+          matchImageCalls += 1;
+          if (matchImageCalls === 1) {
+            return { success: true, matches: [hit], bestMatch: hit, processingTimeMs: 4 };
+          }
+          return { success: true, matches: [], bestMatch: null, processingTimeMs: 4 };
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => bounds,
+      } as any,
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: true,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: 40,
+      y: 30,
+      rel_x: 0.05,
+      rel_y: 0.05,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: Buffer.from('template').toString('base64'),
+    };
+
+    const first = await engine.resolveSmartClick(event, { x: 40, y: 30 });
+    expect(first).toEqual({ x: 290, y: 150 });
+    expect(engine.getStatus().smartClickAnchorDx).toBe(50);
+    expect(engine.getStatus().smartClickAnchorDy).toBe(40);
+
+    bounds = { x: 400, y: 100, width: 800, height: 600 };
+    const second = await engine.resolveSmartClick(event, { x: 40, y: 30 });
+    expect(second).toEqual({ x: 490, y: 170 });
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
 });
