@@ -278,7 +278,7 @@ describe('PlaybackEngine', () => {
       { x: 100, y: 200 }
     );
 
-    await jest.advanceTimersByTimeAsync(300);
+    await jest.advanceTimersByTimeAsync(500);
     const result = await pending;
 
     expect(result).toEqual({ x: 100, y: 200 });
@@ -706,7 +706,7 @@ describe('PlaybackEngine', () => {
       },
       { x: 100, y: 200 }
     );
-    await jest.advanceTimersByTimeAsync(300);
+    await jest.advanceTimersByTimeAsync(500);
     const result = await pending;
 
     expect(result).toEqual({ x: 500, y: 450 });
@@ -766,7 +766,7 @@ describe('PlaybackEngine', () => {
     };
 
     const pending = engine.getSmartClickCoords(5, event, expected);
-    await jest.advanceTimersByTimeAsync(300);
+    await jest.advanceTimersByTimeAsync(500);
     const clicked = await pending;
 
     expect(clicked).toEqual({ x: 110, y: 200 });
@@ -1931,5 +1931,77 @@ describe('PlaybackEngine', () => {
     expect(second).toEqual({ x: 490, y: 170 });
     captureSpy.mockRestore();
     screenSpy.mockRestore();
+  });
+
+  test('a click waits for the window lookup before falling back to the anchor', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.91,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        matchImage: () =>
+          new Promise((resolve) => {
+            setTimeout(
+              () =>
+                resolve({
+                  success: true,
+                  matches: [match],
+                  bestMatch: match,
+                  processingTimeMs: 5,
+                }),
+              90
+            );
+          }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+        getTargetBoundsAsync: () =>
+          new Promise((resolve) => {
+            setTimeout(() => resolve({ x: 200, y: 80, width: 800, height: 600 }), 190);
+          }),
+      } as any,
+    }) as any;
+    engine.smartClickAnchor = { dx: 400, dy: 250 };
+    engine.smartClickAnchorTrust = 3;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+    };
+    engine.status = engine.createStatus('playing');
+    const event = {
+      t_ms: 0,
+      type: 'mouse' as const,
+      btn: 'left' as const,
+      x: 40,
+      y: 30,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: false,
+      img_patch_b64: Buffer.from('template').toString('base64'),
+    };
+    const expected = { x: 40, y: 30 };
+    const inflight = engine.resolveSmartClick(event, expected);
+    engine.smartClickPromises.set(0, inflight);
+    engine.smartClickTelemetry.set(0, { open: true });
+    const pending = engine.getSmartClickCoords(0, event, expected);
+    await jest.advanceTimersByTimeAsync(280);
+    await expect(pending).resolves.toEqual({ x: 290, y: 150 });
+    expect(engine.getStatus().smartClickLastSource).toBe('window');
+    expect(engine.getStatus().smartClickLastConfidence).toBeGreaterThan(0.6);
+    captureSpy.mockRestore();
+    jest.useRealTimers();
   });
 });

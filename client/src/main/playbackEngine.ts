@@ -71,9 +71,10 @@ export class PlaybackEngine extends EventEmitter {
     private smartClickInFlight = new Set<number>();
     private smartClickPromises = new Map<number, Promise<{ x: number; y: number }>>();
     private smartClickTelemetry = new Map<number, { open: boolean }>();
-    private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS = 260;
     private static readonly SMART_CLICK_MAX_BUDGET_MS = 260;
     private static readonly SMART_CLICK_BOUNDS_WAIT_MS = 200;
+    private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS =
+        PlaybackEngine.SMART_CLICK_BOUNDS_WAIT_MS + PlaybackEngine.SMART_CLICK_MAX_BUDGET_MS;
     private static readonly SMART_CLICK_MIN_SCALE = 0.7;
     private static readonly SMART_CLICK_MAX_SCALE = 1.4;
     private static readonly SMART_CLICK_ADAPTIVE_MIN_SCALE = 0.55;
