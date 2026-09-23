@@ -139,12 +139,17 @@ double gTakeoverInputIgnoreUntilMs = 0.0;
 bool gReplayWasActiveBeforePause = false;
 bool gBlockTakeoverUntilReplayDispatch = false;
 bool gSkipNextDtAfterUnpause = false;
+bool gDeathLatch = false;
 std::int64_t gReplayPhaseTicks = 0;
+std::atomic<std::uint64_t> gProcessCommandsCount{0};
+std::atomic<std::uint64_t> gProcessQueuedButtonsCount{0};
 
 void startRecording();
 void stopReplay();
 void startReplay();
 void dispatchDueReplayEvents(std::int64_t elapsedTicks);
+void tryDispatchReplay();
+bool didAnyPlayerDie();
 
 std::uint64_t unixNowMs() {
   using namespace std::chrono;
@@ -334,6 +339,9 @@ std::string buildStatusPayload() {
   payload["last_freeze_tick"] = static_cast<double>(gLastFreezeTick);
   payload["last_freeze_run_id"] = static_cast<double>(gLastFreezeRunId);
   payload["last_freeze_replay_index"] = static_cast<double>(gLastFreezeReplayIndex);
+  payload["process_commands_count"] = static_cast<double>(gProcessCommandsCount.load());
+  payload["process_queued_buttons_count"] = static_cast<double>(gProcessQueuedButtonsCount.load());
+  payload["dispatch_seam"] = "processQueuedButtons";
   payload["record_active"] = gRecordActive.load();
   payload["record_armed"] = gRecordArmed.load();
   payload["record_complete"] = gRecordComplete.load();
@@ -1135,6 +1143,16 @@ void dispatchDueReplayEvents(std::int64_t elapsedTicks) {
   }
 }
 
+void tryDispatchReplay() {
+  auto* layer = gActivePlayLayer ? gActivePlayLayer : PlayLayer::get();
+  if (!layer || !gReplayActive.load() || layer->m_isPaused || layer->m_hasCompletedLevel || didAnyPlayerDie()) {
+    return;
+  }
+  syncProgressClock();
+  const std::int64_t elapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
+  dispatchDueReplayEvents(elapsedTicks);
+}
+
 void startReplay() {
   std::lock_guard<std::mutex> lock(gMacroMutex);
   gReplayEvents = gPendingReplayEvents;
@@ -1230,18 +1248,15 @@ bool didAnyPlayerDie() {
 
 class $modify(GJBaseGameLayer) {
   void processCommands(float dt, bool isHalfTick, bool isLastTick) {
-    if (!isHalfTick) {
-      syncProgressClock();
-      auto* layer = PlayLayer::get();
-      if (layer && gReplayActive.load() && !layer->m_isPaused && !layer->m_hasCompletedLevel && !didAnyPlayerDie()) {
-        const std::int64_t elapsedTicks = std::max<std::int64_t>(0, gGameTick - gReplayStartTick);
-        dispatchDueReplayEvents(elapsedTicks);
-      }
-    }
+    gProcessCommandsCount.fetch_add(1);
+    tryDispatchReplay();
     GJBaseGameLayer::processCommands(dt, isHalfTick, isLastTick);
-    if (!isHalfTick) {
-      syncProgressClock();
-    }
+  }
+
+  void processQueuedButtons(float dt, bool clearInputQueue) {
+    gProcessQueuedButtonsCount.fetch_add(1);
+    tryDispatchReplay();
+    GJBaseGameLayer::processQueuedButtons(dt, clearInputQueue);
   }
 
   void update(float dt) {
@@ -1318,6 +1333,7 @@ class $modify(GJBaseGameLayer) {
         gRecordStopRequested.store(false);
         gReplayStopRequested.store(false);
         gAttemptBoundaryPending = false;
+        gDeathLatch = false;
         gWasPaused = false;
         gPauseStartedGameMs = 0.0;
         setReplayState(ReplayState::Idle, "level_context_changed");
@@ -1442,46 +1458,47 @@ class $modify(GJBaseGameLayer) {
     // Important: if replay is only armed (not yet active), keep it armed so
     // it can start on the next attempt boundary.
     if (didAnyPlayerDie()) {
-      gReplayStopRequested.store(false);
-      const bool replayWasLive = gReplayActive.load();
-      const bool replayWasRequested = replayWasLive || gReplayArmed.load() || gReplaySessionActive.load();
-      if (replayWasLive && gReplayIndex > 0) {
-        gLastFreezeTick = currentProgressTick();
-        gLastFreezeRunId = gReplayRunId.load();
-        gLastFreezeReplayIndex = gReplayIndex;
-      }
-      if (replayWasLive) {
-        stopReplay();
-      }
-      if (replayWasRequested) {
-        bool canRearm = false;
-        {
-          std::lock_guard<std::mutex> lock(gMacroMutex);
-          if (gPendingReplayEvents.empty() && !gReplayEvents.empty()) {
-            gPendingReplayEvents = gReplayEvents;
+      if (!gDeathLatch) {
+        gDeathLatch = true;
+        gReplayStopRequested.store(false);
+        const bool replayWasLive = gReplayActive.load();
+        const bool replayWasRequested = replayWasLive || gReplayArmed.load() || gReplaySessionActive.load();
+        if (replayWasLive) {
+          gLastFreezeTick = currentProgressTick();
+          gLastFreezeRunId = gReplayRunId.load();
+          gLastFreezeReplayIndex = gReplayIndex;
+          stopReplay();
+        }
+        if (replayWasRequested) {
+          bool canRearm = false;
+          {
+            std::lock_guard<std::mutex> lock(gMacroMutex);
+            if (gPendingReplayEvents.empty() && !gReplayEvents.empty()) {
+              gPendingReplayEvents = gReplayEvents;
+            }
+            canRearm = !gPendingReplayEvents.empty();
           }
-          canRearm = !gPendingReplayEvents.empty();
+          if (canRearm) {
+            gReplayArmed.store(true);
+            gReplaySessionActive.store(true);
+            const std::int64_t nextSerial = gAttemptBoundaryPending ? gAttemptSerial : gAttemptSerial + 1;
+            gReplayStartBoundarySerial = nextSerial;
+            setReplayState(ReplayState::Armed, "replay_rearm_after_death");
+          }
         }
-        if (canRearm) {
-          gReplayArmed.store(true);
-          gReplaySessionActive.store(true);
-          gReplayStartBoundarySerial = gAttemptSerial + 1;
-          setReplayState(ReplayState::Armed, "replay_rearm_after_death");
+        if (gRecordActive.load()) {
+          stopRecording();
+          gRecordArmed.store(false);
         }
+        if (gRecordArmed.load()) {
+          setRecordState(RecordState::Armed, "record_kept_armed_after_death");
+        } else {
+          setRecordState(RecordState::Idle, "record_idle_after_death");
+        }
+        gTakeoverArmed.store(false);
       }
-      if (gRecordActive.load()) {
-        stopRecording();
-        // Active recording should not stay armed after finalize.
-        gRecordArmed.store(false);
-      }
-      if (gRecordArmed.load()) {
-        setRecordState(RecordState::Armed, "record_kept_armed_after_death");
-      } else {
-        setRecordState(RecordState::Idle, "record_idle_after_death");
-      }
-      // Keep record_armed across death when recording is not yet active, so
-      // F9 arm can start on the next attempt boundary.
-      gTakeoverArmed.store(false);
+    } else {
+      gDeathLatch = false;
     }
 
     if (levelCompleted) {

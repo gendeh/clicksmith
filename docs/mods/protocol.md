@@ -31,7 +31,7 @@ Response:
 }
 ```
 
-Clicksmith playback uses progress tick as the clock. Every event carries `t_tick`. Due-ness is `t_tick <= elapsedTicks`. The client refuses playback when `protocol_version` is not checkout `2.0.0`. Verify with `npm run verify:geode-freeze`.
+Clicksmith playback uses progress tick as the clock. Every event carries `t_tick`. Due-ness is `t_tick <= elapsedTicks`. Dispatch runs from `processQueuedButtons` (`processCommands` is inlined on Mac ARM 2.2081). The client refuses playback when `protocol_version` is not checkout `2.0.0`. Verify with `npm run verify:geode-freeze`.
 
 ## Core Endpoints (v0.2)
 

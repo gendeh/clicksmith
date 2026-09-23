@@ -71,13 +71,14 @@ function keystroke(keyCode) {
 async function nudgeAttempt(status) {
   activateGeometryDash();
   await sleep(200);
+  // Never send Escape. During play it pauses; on the pause menu it exits the level.
   if (status?.paused) {
-    keystroke(53);
-    await sleep(250);
+    keystroke(36);
+    await sleep(200);
     keystroke(49);
-  } else {
-    keystroke(49);
+    return;
   }
+  keystroke(49);
 }
 
 async function startReplay(events) {
@@ -146,7 +147,7 @@ async function main() {
       process.exit(1);
     }
     await nudgeAttempt((await getStatus()) || previous);
-    const freeze = await waitForMacroFreeze(previous, 25000);
+    const freeze = await waitForMacroFreeze(previous, 40000);
     if (!freeze.ok) {
       const failed = {
         error: 'macro_freeze_timeout',

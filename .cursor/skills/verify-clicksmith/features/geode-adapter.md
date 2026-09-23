@@ -30,4 +30,5 @@ Preconditions:
 
 - The manager can look connected in copy while `probeAdapter` failed. Trust `/status`, not the Settings sentence alone.
 - Tick snap and ship-hold drift are gameplay correctness, not HTTP 200.
+- On Mac ARM 2.2081, `processCommands` is inlined into `update`. `/status` `process_commands_count` stays 0. `process_queued_buttons_count` must rise during play. That is the dispatch seam.
 - Never claim this feature from a Cloud Agent that cannot launch Geometry Dash.
