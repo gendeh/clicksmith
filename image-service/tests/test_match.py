@@ -1,5 +1,6 @@
 import base64
 import io
+import time
 
 import cv2
 import numpy as np
@@ -338,3 +339,44 @@ def test_ocr_uses_one_pass_inside_the_requested_budget(monkeypatch):
     assert data["items"][0]["bounds"] == {"x": 40, "y": 30, "width": 80, "height": 20}
     assert "Submit" in data["text"]
     assert calls == [("data", 0.08)]
+
+
+def test_hybrid_does_not_start_features_after_the_budget_is_spent(monkeypatch):
+    template_match = {
+        "x": 90,
+        "y": 70,
+        "confidence": 0.7,
+        "method": "template",
+        "score": 0.7,
+        "scale": 1.0,
+        "bounds": {"x": 74, "y": 54, "width": 32, "height": 32},
+    }
+
+    def spent_template(*_args, **_kwargs):
+        time.sleep(0.03)
+        return template_match, [template_match]
+
+    def feature_should_not_run(*_args, **_kwargs):
+        raise AssertionError("feature ran after the budget")
+
+    monkeypatch.setattr("app.main.match_template_multiscale", spent_template)
+    monkeypatch.setattr("app.main.match_feature", feature_should_not_run)
+    app = create_app()
+    client = app.test_client()
+    image = np.zeros((32, 32, 3), dtype=np.uint8)
+    res = client.post(
+        "/match",
+        json={
+            "template": to_base64(image),
+            "searchArea": to_base64(image),
+            "threshold": 0.6,
+            "method": "hybrid",
+            "maxBudgetMs": 20,
+        },
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert data["bestMatch"]["method"] == "template"
+    assert data["bestMatch"]["x"] == 90
+    assert data["bestMatch"]["y"] == 70

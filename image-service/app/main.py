@@ -404,7 +404,8 @@ def match_image():
             )
 
         if method in ["feature", "hybrid"]:
-            should_try_feature = (
+            budget_left = max_budget_ms - (time.time() - start_time) * 1000
+            should_try_feature = budget_left > 0 and (
                 method == "feature"
                 or not best_match
                 or best_match["confidence"] < max(0.82, threshold + 0.12)
