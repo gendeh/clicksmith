@@ -1651,6 +1651,103 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
+            if (!timedOut() && preferredBounds && event.img_context_b64) {
+                const contextRegion = {
+                    x: Math.max(desktopBounds.x, preferredBounds.x),
+                    y: Math.max(desktopBounds.y, preferredBounds.y),
+                    width: Math.max(
+                        1,
+                        Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
+                            Math.max(desktopBounds.x, preferredBounds.x)
+                    ),
+                    height: Math.max(
+                        1,
+                        Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
+                            Math.max(desktopBounds.y, preferredBounds.y)
+                    ),
+                };
+                const contextArea = await captureRegion(contextRegion);
+                const contextBudget = Math.max(30, Math.min(remainingBudgetMs(), adaptationMode ? 140 : 100));
+                const contextResponse = await this.imageService.matchImage({
+                    template: event.img_context_b64,
+                    templateHash: typeof event.metadata?.img_context_hash === 'string' ? event.metadata.img_context_hash : undefined,
+                    searchArea: contextArea.toString('base64'),
+                    threshold: adaptationMode ? Math.max(0.48, threshold - 0.1) : threshold,
+                    method: 'feature',
+                    findAll: true,
+                    maxMatches: PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
+                    timeoutMs: Math.max(40, Math.min(stageTimeoutMs('target_window'), 220)),
+                    minScale: PlaybackEngine.SMART_CLICK_ADAPTIVE_MIN_SCALE,
+                    maxScale: PlaybackEngine.SMART_CLICK_ADAPTIVE_MAX_SCALE,
+                    scaleHint: this.smartClickScaleHint ?? 1.0,
+                    maxBudgetMs: contextBudget,
+                });
+                const contextError = String(contextResponse.error ?? '');
+                if (this.isServiceUnavailableErrorText(contextError)) {
+                    this.markServiceUnavailableFallback();
+                    return fallbackCoords;
+                }
+                const contextCandidates = this.getMatchCandidates(contextResponse);
+                const pickedContext = await this.pickBestSmartClickCandidate(
+                    'target_window',
+                    'relaxed',
+                    event,
+                    expected,
+                    contextCandidates,
+                    adaptationMode ? Math.max(0.48, threshold - 0.08) : threshold,
+                    { x: contextRegion.x, y: contextRegion.y },
+                    PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
+                    preferredBounds,
+                    { image: contextArea, offsetX: contextRegion.x, offsetY: contextRegion.y },
+                    {
+                        adaptationMode,
+                        maxFeatureJumpPx: adaptationMode
+                            ? Math.max(900, searchRadius * 2)
+                            : Math.max(560, Math.floor(searchRadius * 1.5)),
+                    }
+                );
+                this.traceSmartClick('stage_context_feature', {
+                    candidates: contextCandidates.length,
+                    picked: !!pickedContext,
+                    pickedMethod: pickedContext?.method,
+                    pickedConf: pickedContext ? Number(pickedContext.confidence.toFixed(3)) : undefined,
+                    pickedScale: pickedContext?.scale,
+                    bestConf:
+                        contextCandidates.length > 0
+                            ? Number(contextCandidates[0].confidence.toFixed(3))
+                            : undefined,
+                    bestMethod: contextCandidates[0]?.method,
+                });
+                if (pickedContext) {
+                    if (!telemetry.open) return pickedContext.coords;
+                    if (pickedContext.confidence >= 0.82 && !this.hasMeaningfulScaleShift(pickedContext.scale)) {
+                        this.setSmartClickAnchor(expected, pickedContext.coords);
+                    } else if (this.smartClickAnchor) {
+                        this.clearSmartClickAnchor();
+                    }
+                    this.recordSmartClickStableScale(pickedContext.scale);
+                    this.updateSmartClickScaleHint(pickedContext.scale);
+                    this.smartClickConsecutiveFailures = 0;
+                    if (this.smartClickAdaptationClicksLeft > 0) {
+                        this.smartClickAdaptationClicksLeft = Math.max(0, this.smartClickAdaptationClicksLeft - 1);
+                    }
+                    this.status = {
+                        ...this.status,
+                        successfulMatches: this.status.successfulMatches + 1,
+                        lastError: this.status.lastError === 'image_service_unavailable' ? undefined : this.status.lastError,
+                        smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
+                    };
+                    this.markSmartClickSource(
+                        'window',
+                        pickedContext.method,
+                        pickedContext.confidence,
+                        pickedContext.dhashDistance,
+                        pickedContext.scale
+                    );
+                    return pickedContext.coords;
+                }
+            }
+
             if (!timedOut() && preferredBounds) {
                 const ocrRegion = {
                     x: Math.max(desktopBounds.x, preferredBounds.x),
@@ -1813,103 +1910,6 @@ export class PlaybackEngine extends EventEmitter {
                         pickedFullscreen.scale
                     );
                     return pickedFullscreen.coords;
-                }
-            }
-
-            if (!timedOut() && preferredBounds && event.img_context_b64) {
-                const contextRegion = {
-                    x: Math.max(desktopBounds.x, preferredBounds.x),
-                    y: Math.max(desktopBounds.y, preferredBounds.y),
-                    width: Math.max(
-                        1,
-                        Math.min(desktopRight, preferredBounds.x + preferredBounds.width) -
-                            Math.max(desktopBounds.x, preferredBounds.x)
-                    ),
-                    height: Math.max(
-                        1,
-                        Math.min(desktopBottom, preferredBounds.y + preferredBounds.height) -
-                            Math.max(desktopBounds.y, preferredBounds.y)
-                    ),
-                };
-                const contextArea = await captureRegion(contextRegion);
-                const contextBudget = Math.max(30, Math.min(remainingBudgetMs(), adaptationMode ? 140 : 100));
-                const contextResponse = await this.imageService.matchImage({
-                    template: event.img_context_b64,
-                    templateHash: typeof event.metadata?.img_context_hash === 'string' ? event.metadata.img_context_hash : undefined,
-                    searchArea: contextArea.toString('base64'),
-                    threshold: adaptationMode ? Math.max(0.48, threshold - 0.1) : threshold,
-                    method: 'feature',
-                    findAll: true,
-                    maxMatches: PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
-                    timeoutMs: Math.max(40, Math.min(stageTimeoutMs('target_window'), 220)),
-                    minScale: PlaybackEngine.SMART_CLICK_ADAPTIVE_MIN_SCALE,
-                    maxScale: PlaybackEngine.SMART_CLICK_ADAPTIVE_MAX_SCALE,
-                    scaleHint: this.smartClickScaleHint ?? 1.0,
-                    maxBudgetMs: contextBudget,
-                });
-                const contextError = String(contextResponse.error ?? '');
-                if (this.isServiceUnavailableErrorText(contextError)) {
-                    this.markServiceUnavailableFallback();
-                    return fallbackCoords;
-                }
-                const contextCandidates = this.getMatchCandidates(contextResponse);
-                const pickedContext = await this.pickBestSmartClickCandidate(
-                    'target_window',
-                    'relaxed',
-                    event,
-                    expected,
-                    contextCandidates,
-                    adaptationMode ? Math.max(0.48, threshold - 0.08) : threshold,
-                    { x: contextRegion.x, y: contextRegion.y },
-                    PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
-                    preferredBounds,
-                    { image: contextArea, offsetX: contextRegion.x, offsetY: contextRegion.y },
-                    {
-                        adaptationMode,
-                        maxFeatureJumpPx: adaptationMode
-                            ? Math.max(900, searchRadius * 2)
-                            : Math.max(560, Math.floor(searchRadius * 1.5)),
-                    }
-                );
-                this.traceSmartClick('stage_context_feature', {
-                    candidates: contextCandidates.length,
-                    picked: !!pickedContext,
-                    pickedMethod: pickedContext?.method,
-                    pickedConf: pickedContext ? Number(pickedContext.confidence.toFixed(3)) : undefined,
-                    pickedScale: pickedContext?.scale,
-                    bestConf:
-                        contextCandidates.length > 0
-                            ? Number(contextCandidates[0].confidence.toFixed(3))
-                            : undefined,
-                    bestMethod: contextCandidates[0]?.method,
-                });
-                if (pickedContext) {
-                    if (!telemetry.open) return pickedContext.coords;
-                    if (pickedContext.confidence >= 0.82 && !this.hasMeaningfulScaleShift(pickedContext.scale)) {
-                        this.setSmartClickAnchor(expected, pickedContext.coords);
-                    } else if (this.smartClickAnchor) {
-                        this.clearSmartClickAnchor();
-                    }
-                    this.recordSmartClickStableScale(pickedContext.scale);
-                    this.updateSmartClickScaleHint(pickedContext.scale);
-                    this.smartClickConsecutiveFailures = 0;
-                    if (this.smartClickAdaptationClicksLeft > 0) {
-                        this.smartClickAdaptationClicksLeft = Math.max(0, this.smartClickAdaptationClicksLeft - 1);
-                    }
-                    this.status = {
-                        ...this.status,
-                        successfulMatches: this.status.successfulMatches + 1,
-                        lastError: this.status.lastError === 'image_service_unavailable' ? undefined : this.status.lastError,
-                        smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
-                    };
-                    this.markSmartClickSource(
-                        'window',
-                        pickedContext.method,
-                        pickedContext.confidence,
-                        pickedContext.dhashDistance,
-                        pickedContext.scale
-                    );
-                    return pickedContext.coords;
                 }
             }
 

@@ -1453,4 +1453,73 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
     screenSpy.mockRestore();
   });
+
+  test('a context feature match runs before fullscreen spends the click budget', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('region'));
+    const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(Buffer.from('screen'));
+    let now = 0;
+    const feature = {
+      x: 40,
+      y: 30,
+      confidence: 0.66,
+      method: 'feature' as const,
+      scale: 1,
+      homography_ok: true,
+      inliers: 12,
+      bounds: { x: 20, y: 10, width: 40, height: 40 },
+    };
+    const matchImage = jest.fn(async (request: { method?: string }) => {
+      if (request.method === 'feature') {
+        return { success: true, matches: [feature], bestMatch: feature, processingTimeMs: 8 };
+      }
+      now += 100;
+      return { success: true, matches: [], bestMatch: null, processingTimeMs: 100 };
+    });
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: { matchImage } as any,
+      windowManager: {
+        getTargetBounds: () => ({ x: 500, y: 200, width: 800, height: 600 }),
+        getTargetBoundsAsync: async () => ({ x: 500, y: 200, width: 800, height: 600 }),
+      } as any,
+      clock: {
+        now: () => now,
+        setTimeout: (handler, timeout) => setTimeout(handler, timeout),
+        clearTimeout: (handle) => clearTimeout(handle),
+      },
+    }) as any;
+    engine.config = {
+      ...config,
+      target: 'Terminal',
+      useImageMatching: true,
+      useRelativeCoords: false,
+      imageMatchThreshold: 0.6,
+      retryCount: 0,
+    };
+    engine.status = engine.createStatus('playing');
+
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 40,
+        y: 30,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: Buffer.from('template').toString('base64'),
+        img_context_b64: Buffer.from('context').toString('base64'),
+      },
+      { x: 40, y: 30 }
+    );
+
+    expect(result).toEqual({ x: 540, y: 230 });
+    expect(matchImage.mock.calls.filter(call => call[0].method !== 'feature')).toHaveLength(2);
+    expect(matchImage.mock.calls.some(call => call[0].method === 'feature')).toBe(true);
+    expect(engine.getStatus().smartClickLastConfidence).toBeCloseTo(0.66);
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  });
 });
