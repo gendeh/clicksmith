@@ -1,7 +1,9 @@
 import { PlaybackEngine } from '../src/main/playbackEngine';
+import { RecordingEngine } from '../src/main/recordingEngine';
 import { ImageService } from '../src/services/imageService';
 import * as screenCapture from '../src/main/screenCapture';
 import { computeDHash } from '../src/main/imageHash';
+import { MockInputHook } from '../src/main/inputHooks';
 
 function patternPng(size: number): Promise<Buffer> {
   const sharp = require('sharp');
@@ -184,6 +186,87 @@ liveMatch('a live template miss still clicks the recorded word', async () => {
   expect(result.y).toBeGreaterThanOrEqual(windowOrigin.y + 60);
   expect(result.y).toBeLessThanOrEqual(windowOrigin.y + 180);
   expect(elapsed).toBeLessThan(1500);
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+});
+
+liveMatch('a recorded word is what playback clicks after the window moves', async () => {
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  const healthy = await imageService.healthCheck(800);
+  expect(healthy).toBe(true);
+
+  const sharp = require('sharp');
+  const patch = await patternPng(128);
+  const submitPng = await sharp(
+    Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="384" height="384">
+      <rect width="384" height="384" fill="black"/>
+      <text x="80" y="220" font-size="72" font-family="Helvetica" fill="white">Submit</text>
+    </svg>`)
+  ).png().toBuffer();
+  const capturePatchSpy = jest.spyOn(screenCapture, 'capturePatch').mockImplementation(async (_x, _y, size) => {
+    return size <= 128 ? patch : submitPng;
+  });
+
+  const inputHook = new MockInputHook();
+  const recorder = new RecordingEngine({
+    inputHook,
+    windowManager: {
+      getTargetBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }),
+    } as any,
+    imageService,
+  });
+  await recorder.start({
+    target: 'Terminal',
+    captureImages: true,
+    imagePatchSize: 128,
+    minEventInterval: 0,
+    recordKeyboard: true,
+    recordMouse: true,
+    stopHotkey: 'F9',
+    takeoverHotkey: 'F11',
+  });
+  inputHook.emit('mousedown', { x: 40, y: 70, button: 1 });
+  const recorded = await recorder.stop();
+  capturePatchSpy.mockRestore();
+  const event = recorded.profile.events[0];
+  expect(event.metadata).toEqual(expect.objectContaining({
+    ocr_primary_text_normalized: 'submit',
+  }));
+
+  const windowOrigin = { x: 800, y: 100 };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(submitPng);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockResolvedValue(submitPng);
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: {
+      getTargetBounds: () => ({ x: windowOrigin.x, y: windowOrigin.y, width: 384, height: 384 }),
+      getTargetBoundsAsync: async () => ({ x: windowOrigin.x, y: windowOrigin.y, width: 384, height: 384 }),
+    } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-recorded-word',
+    target: 'Terminal',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: false,
+    imageSearchRadius: 160,
+  };
+  engine.status = engine.createStatus('playing');
+  const result = await engine.resolveSmartClick(event, { x: event.x, y: event.y });
+  const status = engine.getStatus();
+  expect(status.smartClickLastConfidence).toBeGreaterThan(0.6);
+  expect(status.smartClickLastSource).toBe('window');
+  expect(result).not.toEqual({ x: 40, y: 70 });
+  expect(result.x).toBeGreaterThanOrEqual(windowOrigin.x + 40);
+  expect(result.x).toBeLessThanOrEqual(windowOrigin.x + 340);
+  expect(result.y).toBeGreaterThanOrEqual(windowOrigin.y + 80);
+  expect(result.y).toBeLessThanOrEqual(windowOrigin.y + 280);
   captureSpy.mockRestore();
   screenSpy.mockRestore();
 });
