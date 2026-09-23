@@ -692,6 +692,7 @@ def ocr():
         )
 
         line_map = {}
+        words = []
         for idx, raw_text in enumerate(data_dict.get("text", [])):
             item_text = (raw_text or "").strip()
             try:
@@ -706,6 +707,18 @@ def ocr():
             top = int(data_dict.get("top", [0])[idx])
             width = int(data_dict.get("width", [0])[idx])
             height = int(data_dict.get("height", [0])[idx])
+            words.append(
+                {
+                    "text": item_text,
+                    "confidence": confidence,
+                    "bounds": {
+                        "x": left,
+                        "y": top,
+                        "width": int(max(1, width)),
+                        "height": int(max(1, height)),
+                    },
+                }
+            )
             key = (
                 int(data_dict.get("block_num", [0])[idx]),
                 int(data_dict.get("par_num", [0])[idx]),
@@ -749,8 +762,13 @@ def ocr():
             if len(items) >= MAX_OCR_ITEMS:
                 break
 
-        processing_ms = int((time.time() - start_time) * 1000)
         text = "\n".join(item["text"] for item in items)[:MAX_OCR_TEXT_CHARS]
+        for word in words:
+            if len(items) >= MAX_OCR_ITEMS:
+                break
+            items.append(word)
+
+        processing_ms = int((time.time() - start_time) * 1000)
         return jsonify(
             {
                 "success": True,

@@ -812,6 +812,56 @@ export class PlaybackEngine extends EventEmitter {
         if (!response.success || !response.items?.length) {
             return null;
         }
+        const phraseTokens = new Set(
+            rawText.split(' ').filter(token => token.length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN)
+        );
+        const wordCounts = new Map<string, number>();
+        const wordChoices: Array<{ text: string; item: (typeof response.items)[number] }> = [];
+        for (const item of response.items) {
+            const candidateText = this.normalizeOcrText(item.text);
+            if (!candidateText || candidateText.includes(' ') || candidateText === rawText) continue;
+            if (!phraseTokens.has(candidateText)) continue;
+            wordCounts.set(candidateText, (wordCounts.get(candidateText) ?? 0) + 1);
+            wordChoices.push({ text: candidateText, item });
+        }
+        let bestWord: SmartClickCandidateSelection | null = null;
+        let bestWordRank: [number, number, number] | null = null;
+        for (const choice of wordChoices) {
+            const confidence = Math.min(1, (Number(choice.item.confidence) || 0) / 100);
+            if (confidence < Math.max(0.55, threshold - 0.05)) continue;
+            const coords = {
+                x: Math.round(stageRegion.x + choice.item.bounds.x + choice.item.bounds.width / 2),
+                y: Math.round(stageRegion.y + choice.item.bounds.y + choice.item.bounds.height / 2),
+            };
+            const rank: [number, number, number] = [
+                wordCounts.get(choice.text) ?? 1,
+                -choice.text.length,
+                Math.hypot(coords.x - expected.x, coords.y - expected.y),
+            ];
+            if (
+                bestWordRank &&
+                (rank[0] > bestWordRank[0] ||
+                    (rank[0] === bestWordRank[0] && rank[1] > bestWordRank[1]) ||
+                    (rank[0] === bestWordRank[0] && rank[1] === bestWordRank[1] && rank[2] >= bestWordRank[2]))
+            ) {
+                continue;
+            }
+            bestWordRank = rank;
+            bestWord = {
+                coords,
+                confidence,
+                method: 'ocr',
+            };
+        }
+        if (bestWord) {
+            this.traceSmartClick('stage_ocr_window', {
+                text: rawText,
+                confidence: Number(bestWord.confidence.toFixed(3)),
+                x: bestWord.coords.x,
+                y: bestWord.coords.y,
+            });
+            return bestWord;
+        }
         let best: SmartClickCandidateSelection | null = null;
         let bestScore = 0;
         for (const item of response.items) {

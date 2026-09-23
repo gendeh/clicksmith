@@ -557,6 +557,92 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
   });
 
+  test('a recorded phrase clicks the rare word, not the repeated word', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        ocrImage: jest.fn().mockResolvedValue({
+          success: true,
+          processingTimeMs: 12,
+          items: [
+            {
+              text: 'Target A: Sunflower Target B: Mint Target C: Ocean',
+              confidence: 94,
+              bounds: { x: 47, y: 126, width: 660, height: 23 },
+            },
+            {
+              text: 'Target D: Coral',
+              confidence: 94,
+              bounds: { x: 47, y: 296, width: 169, height: 23 },
+            },
+            { text: 'Target', confidence: 96, bounds: { x: 47, y: 126, width: 62, height: 18 } },
+            { text: 'A:', confidence: 90, bounds: { x: 116, y: 126, width: 22, height: 18 } },
+            { text: 'Sunflower', confidence: 91, bounds: { x: 158, y: 126, width: 102, height: 18 } },
+            { text: 'Target', confidence: 95, bounds: { x: 280, y: 126, width: 62, height: 18 } },
+            { text: 'Mint', confidence: 92, bounds: { x: 401, y: 126, width: 44, height: 18 } },
+            { text: 'Target', confidence: 95, bounds: { x: 520, y: 126, width: 62, height: 18 } },
+            { text: 'Ocean', confidence: 93, bounds: { x: 641, y: 126, width: 66, height: 18 } },
+            { text: 'Target', confidence: 96, bounds: { x: 47, y: 296, width: 62, height: 18 } },
+            { text: 'D:', confidence: 90, bounds: { x: 116, y: 296, width: 22, height: 18 } },
+            { text: 'Coral', confidence: 94, bounds: { x: 161, y: 296, width: 55, height: 18 } },
+          ],
+        }),
+      } as any,
+      windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }) } as any,
+    }) as any;
+
+    const sunflower = await engine.tryOcrSmartClickFallback(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 0,
+        y: 0,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        metadata: {
+          ocr_primary_text_normalized: 'target a sunflower',
+          ocr_anchor_norm_x: 0.4,
+          ocr_anchor_norm_y: 0.4,
+        },
+      },
+      { x: 120, y: 80, width: 800, height: 600 },
+      { x: 320, y: 120 },
+      0.6,
+      400
+    );
+    const coral = await engine.tryOcrSmartClickFallback(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 0,
+        y: 0,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        metadata: {
+          ocr_primary_text_normalized: 'target d coral',
+          ocr_anchor_norm_x: -0.5,
+          ocr_anchor_norm_y: 0.5,
+        },
+      },
+      { x: 120, y: 80, width: 800, height: 600 },
+      { x: 320, y: 120 },
+      0.6,
+      400
+    );
+
+    expect(sunflower?.method).toBe('ocr');
+    expect(sunflower?.coords).toEqual({ x: 329, y: 215 });
+    expect(coral?.coords).toEqual({ x: 309, y: 385 });
+    captureSpy.mockRestore();
+  });
+
   test('SmartClick clicks the visual match when the window moved and relative coords are off', async () => {
     const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
     const movedWindow = { x: 500, y: 200, width: 800, height: 600 };

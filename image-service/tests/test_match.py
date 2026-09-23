@@ -702,6 +702,34 @@ def test_ocr_endpoint_returns_line_items():
     assert isinstance(data["items"], list)
 
 
+def test_ocr_returns_the_distinctive_word_on_a_merged_line():
+    app = create_app()
+    client = app.test_client()
+    page = np.full((600, 800, 3), 245, dtype=np.uint8)
+    labels = (
+        (48, 142, "Target A: Sunflower Target B: Mint Target C: Ocean"),
+        (48, 312, "Target D: Coral"),
+    )
+    for x, y, label in labels:
+        cv2.putText(page, label, (x, y), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)
+    res = client.post("/ocr", json={"image": to_base64(page), "timeoutMs": 800})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    words = {
+        item["text"].strip().lower(): item
+        for item in data["items"]
+        if " " not in item["text"].strip()
+    }
+    assert "sunflower" in words
+    assert "coral" in words
+    assert words["sunflower"]["bounds"]["width"] < 160
+    assert words["coral"]["bounds"]["width"] < 120
+    lines = [item for item in data["items"] if "Sunflower" in item["text"] and " " in item["text"]]
+    assert lines
+    assert lines[0]["bounds"]["width"] > 400
+
+
 def test_match_endpoint_caps_find_all_work():
     app = create_app()
     client = app.test_client()

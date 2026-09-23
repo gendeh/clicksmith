@@ -2505,3 +2505,126 @@ liveMatch('a real oversized screen capture clicks the cropped patch', async () =
   }
   expect(hits.length).toBeGreaterThan(0);
 }, 30000);
+
+liveMatch('a template miss clicks the recorded word on the text-only page', async () => {
+  const { execFileSync } = require('child_process') as typeof import('child_process');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const serviceDir = '/Users/Shared/OpenClaw_Shared/Git/clicksmith-smartclick-c741/image-service';
+  const python = '/Users/Shared/OpenClaw_Shared/Git/clicksmith/image-service/.venv/bin/python';
+  const raw = execFileSync(
+    python,
+    [
+      '-c',
+      [
+        'import json, os, sys',
+        'import cv2, numpy as np',
+        `sys.path.insert(0, ${JSON.stringify(serviceDir)})`,
+        `os.chdir(${JSON.stringify(serviceDir)})`,
+        'from tests.test_match import to_base64',
+        'page = np.full((600, 800, 3), 245, dtype=np.uint8)',
+        'cv2.putText(page, "Target A: Sunflower Target B: Mint Target C: Ocean", (48, 142), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)',
+        'cv2.putText(page, "Target D: Coral", (48, 312), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (20, 20, 20), 2, cv2.LINE_AA)',
+        'print(json.dumps({"search": to_base64(page)}))',
+      ].join('\n'),
+    ],
+    { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 }
+  );
+  const search = Buffer.from((JSON.parse(raw) as { search: string }).search, 'base64');
+  const ocr = await imageService.ocrImage({ image: search.toString('base64'), timeoutMs: 800 });
+  const wordCenter = (label: string) => {
+    const item = (ocr.items ?? []).find(entry => entry.text.trim().toLowerCase() === label);
+    if (!item) return null;
+    return {
+      x: item.bounds.x + item.bounds.width / 2,
+      y: item.bounds.y + item.bounds.height / 2,
+    };
+  };
+  const sunflower = wordCenter('sunflower');
+  const coral = wordCenter('coral');
+  expect(sunflower).toBeTruthy();
+  expect(coral).toBeTruthy();
+  const windowOrigin = { x: 120, y: 80 };
+  const windowSize = { width: 800, height: 600 };
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(search);
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const patch = await patternPng(96);
+  const recordedLocal = { x: 200, y: 40 };
+  const cases = [
+    { key: 'A', text: 'target a sunflower', word: sunflower! },
+    { key: 'D', text: 'target d coral', word: coral! },
+  ];
+  for (const entry of cases) {
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService,
+      windowManager: {
+        getTargetBounds: () => ({ ...windowOrigin, ...windowSize }),
+        getTargetBoundsAsync: async () => ({ ...windowOrigin, ...windowSize }),
+      } as any,
+    }) as any;
+    engine.config = {
+      profileId: `live-word-${entry.key}`,
+      target: 'Terminal',
+      useImageMatching: true,
+      imageMatchThreshold: 0.6,
+      timingTolerance: 20,
+      retryCount: 0,
+      retryDelay: 10,
+      takeoverHotkey: 'F11',
+      speedMultiplier: 1,
+      useRelativeCoords: true,
+      imageSearchRadius: 160,
+    };
+    engine.status = engine.createStatus('playing');
+    const recorded = {
+      x: windowOrigin.x + recordedLocal.x,
+      y: windowOrigin.y + recordedLocal.y,
+    };
+    const started = Date.now();
+    const result = await engine.resolveSmartClick(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: recorded.x,
+        y: recorded.y,
+        rel_x: recordedLocal.x / windowSize.width,
+        rel_y: recordedLocal.y / windowSize.height,
+        duration_ms: 0,
+        human_override: false,
+        img_patch_b64: patch.toString('base64'),
+        metadata: {
+          ocr_primary_text_normalized: entry.text,
+          ocr_anchor_norm_x: 0.4,
+          ocr_anchor_norm_y: -0.4,
+        },
+      },
+      recorded
+    );
+    const elapsed = Date.now() - started;
+    const status = engine.getStatus();
+    const visual = {
+      x: windowOrigin.x + entry.word.x,
+      y: windowOrigin.y + entry.word.y,
+    };
+    const off = Math.hypot(result.x - visual.x, result.y - visual.y);
+    if (
+      off > 8 ||
+      elapsed >= 460 ||
+      status.smartClickLastMethod !== 'ocr' ||
+      !(status.smartClickLastConfidence > 0.6) ||
+      status.smartClickLastSource !== 'window'
+    ) {
+      captureSpy.mockRestore();
+      screenSpy.mockRestore();
+      throw new Error(
+        `${entry.key} click (${result.x}, ${result.y}) word (${visual.x}, ${visual.y}) off ${off.toFixed(1)} ${status.smartClickLastMethod} ${status.smartClickLastConfidence} source ${status.smartClickLastSource} elapsed ${elapsed}`
+      );
+    }
+  }
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+}, 30000);
