@@ -59,6 +59,7 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
     method = cv2.TM_SQDIFF_NORMED if low_variance else cv2.TM_CCOEFF_NORMED
     raw = cv2.matchTemplate(search_area, template, method)
     score = 1.0 - raw if method == cv2.TM_SQDIFF_NORMED else raw
+    accept_at = max(float(threshold), 0.85) if low_variance else float(threshold)
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(score)
     h, w = template.shape[:2]
 
@@ -70,7 +71,7 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
         limit = max(1, min(MAX_MATCHES, int(max_matches)))
         for _ in range(limit):
             _, best_val, _, best_loc = cv2.minMaxLoc(work)
-            if best_val < threshold:
+            if best_val < accept_at:
                 break
             x, y = best_loc
             matches.append(
@@ -91,7 +92,7 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
             right = min(work.shape[1], x + w + w // 2)
             bottom = min(work.shape[0], y + h + h // 2)
             work[top:bottom, left:right] = -1.0
-    else:
+    elif max_val >= accept_at:
         matches.append(
             {
                 "x": int(max_loc[0] + w / 2),

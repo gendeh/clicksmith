@@ -468,6 +468,27 @@ def test_large_template_miss_returns_inside_the_requested_budget():
     assert data["processingTimeMs"] <= 180
 
 
+def test_flat_template_that_is_missing_is_not_a_click():
+    app = create_app()
+    client = app.test_client()
+    search = np.full((180, 200, 3), (80, 0, 240), dtype=np.uint8)
+    template = np.full((40, 40, 3), (255, 0, 255), dtype=np.uint8)
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="hybrid",
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is False
+    assert data["bestMatch"] is None
+
+
 def test_flat_template_clicks_the_matching_patch_not_the_brighter_decoy():
     app = create_app()
     client = app.test_client()
