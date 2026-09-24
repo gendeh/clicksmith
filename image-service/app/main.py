@@ -775,6 +775,15 @@ def _boxes_overlap(left, right):
     )
 
 
+def _box_contains(outer, inner):
+    return (
+        inner[0] >= outer[0]
+        and inner[1] >= outer[1]
+        and inner[0] + inner[2] <= outer[0] + outer[2]
+        and inner[1] + inner[3] <= outer[1] + outer[3]
+    )
+
+
 def text_line_boxes(image, occupied):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     ink = np.where(gray < 200, 255, 0).astype(np.uint8)
@@ -979,13 +988,26 @@ def _focus_region(image, focus_x, focus_y):
     return (left, top, size, size)
 
 
-def _wide_line_slices(image, occupied, focus_region):
+def _slice_wide_box(box):
+    slices = []
+    x, y, width, height = box
+    cursor = 0
+    while cursor < width and len(slices) < 6:
+        piece = min(400, width - cursor)
+        if piece >= 24:
+            slices.append((x + cursor, y, int(piece), height))
+        cursor += 280
+    return slices
+
+
+def _wide_line_groups(image, occupied, focus_region):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     ink = np.where(gray < 200, 255, 0).astype(np.uint8)
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
     dilated = cv2.dilate(ink, kernel, iterations=1)
     contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    slices = []
+    outside = []
+    clipped = []
     for contour in contours:
         x, y, width, height = cv2.boundingRect(contour)
         if width <= 180 or width > image.shape[1] or height < 6 or height > 28:
@@ -994,33 +1016,69 @@ def _wide_line_slices(image, occupied, focus_region):
         if any(_boxes_overlap(box, kept) for kept in occupied):
             continue
         if focus_region is not None and _boxes_overlap(box, focus_region):
+            _fx, fy, _fw, fh = focus_region
+            if box[1] >= fy and box[1] + box[3] <= fy + fh:
+                continue
+            clipped.extend(_slice_wide_box(box))
             continue
-        cursor = 0
-        while cursor < width and len(slices) < 6:
-            piece = min(400, width - cursor)
-            if piece >= 24:
-                slices.append((box[0] + cursor, box[1], int(piece), box[3]))
-            cursor += 280
-    return slices
+        outside.extend(_slice_wide_box(box))
+    return outside, clipped
 
 
 def recognize_rectangles(image, timeout_s, focus=None, query=None):
+    boxes = text_rectangles(image)
+    lines = text_line_boxes(image, boxes)
+    focus_region = _focus_region(image, focus[0], focus[1]) if focus is not None else None
+    outside, clipped = _wide_line_groups(image, boxes, focus_region)
+    opened = []
+    if clipped:
+        chosen = (clipped[:3] + outside[:3]) if outside else clipped[:6]
+        opened = _line_mosaic_items(image, chosen, timeout_s)
+        if query and _query_found(opened, query):
+            return opened[:MAX_OCR_ITEMS]
+        outside = []
+    elif outside:
+        pieces = outside[:1]
+        for box in boxes:
+            if focus_region is not None and _box_contains(focus_region, box):
+                continue
+            pieces.append(box)
+        chosen = []
+        height = 4
+        for box in pieces:
+            step = box[3] + 6
+            if height + step > 448:
+                break
+            chosen.append(box)
+            height += step
+        opened = _line_mosaic_items(image, chosen, timeout_s) if chosen else []
+        if query and _query_found(opened, query):
+            return opened[:MAX_OCR_ITEMS]
+        if len(outside) > 1:
+            more = _line_mosaic_items(image, outside[1:6], timeout_s)
+            opened.extend(more)
+            if query and _query_found(opened, query):
+                return opened[:MAX_OCR_ITEMS]
+        outside = []
+    elif focus_region is not None and lines:
+        outside_lines = [box for box in lines if not _box_contains(focus_region, box)]
+        inside_buttons = [box for box in boxes if _boxes_overlap(box, focus_region)]
+        if outside_lines and not inside_buttons:
+            opened = _line_mosaic_items(image, outside_lines, timeout_s)
+            if query and _query_found(opened, query):
+                return opened[:MAX_OCR_ITEMS]
     focus_pool = ThreadPoolExecutor(max_workers=1) if focus is not None else None
     focus_future = (
         focus_pool.submit(_focus_items, image, focus[0], focus[1], timeout_s)
         if focus_pool is not None
         else None
     )
-    boxes = text_rectangles(image)
-    lines = text_line_boxes(image, boxes)
-    focus_region = _focus_region(image, focus[0], focus[1]) if focus is not None else None
-    slices = _wide_line_slices(image, boxes, focus_region)
-    wide_pool = ThreadPoolExecutor(max_workers=1) if slices else None
+    wide_pool = ThreadPoolExecutor(max_workers=1) if outside else None
     wide_future = (
-        wide_pool.submit(_line_mosaic_items, image, slices, timeout_s) if wide_pool is not None else None
+        wide_pool.submit(_line_mosaic_items, image, outside, timeout_s) if wide_pool is not None else None
     )
     try:
-        items = []
+        items = list(opened)
         if focus_future is not None:
             items.extend(focus_future.result())
             if query and _query_found(items, query):
