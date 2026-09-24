@@ -958,14 +958,17 @@ export class PlaybackEngine extends EventEmitter {
         const wordChoices = pageWords.filter(choice =>
             phraseTokens.some(token => this.ocrTokenMatches(choice.text, token))
         );
+        const singleToken = phraseTokens.length === 1 && phraseTokens[0] === rawText;
         let bestWord: SmartClickCandidateSelection | null = null;
         let bestWordRank: [number, number, number] | null = null;
         for (const choice of wordChoices) {
             const confidence = Math.min(1, (Number(choice.item.confidence) || 0) / 100);
             if (confidence < Math.max(0.55, threshold - 0.05)) continue;
+            const anchorX = singleToken ? offsetNormX * choice.item.bounds.width : 0;
+            const anchorY = singleToken ? offsetNormY * choice.item.bounds.height : 0;
             const coords = {
-                x: Math.round(stageRegion.x + choice.item.bounds.x + choice.item.bounds.width / 2),
-                y: Math.round(stageRegion.y + choice.item.bounds.y + choice.item.bounds.height / 2),
+                x: Math.round(stageRegion.x + choice.item.bounds.x + choice.item.bounds.width / 2 + anchorX),
+                y: Math.round(stageRegion.y + choice.item.bounds.y + choice.item.bounds.height / 2 + anchorY),
             };
             const rank: [number, number, number] = [
                 wordCounts.get(choice.text) ?? 1,

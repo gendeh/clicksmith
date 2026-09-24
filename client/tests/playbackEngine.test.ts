@@ -682,6 +682,49 @@ describe('PlaybackEngine', () => {
     captureSpy.mockRestore();
   });
 
+  test('a clipped word keeps the click offset inside the matched word', async () => {
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
+    const engine = new PlaybackEngine({
+      inputPlayer: {} as any,
+      imageService: {
+        ocrImage: jest.fn().mockResolvedValue({
+          success: true,
+          processingTimeMs: 12,
+          items: [
+            { text: 'Sunflower', confidence: 91, bounds: { x: 158, y: 126, width: 102, height: 18 } },
+            { text: 'Mint', confidence: 92, bounds: { x: 401, y: 126, width: 44, height: 18 } },
+          ],
+        }),
+      } as any,
+      windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 800, height: 600 }) } as any,
+    }) as any;
+    const clicked = await engine.tryOcrSmartClickFallback(
+      {
+        t_ms: 0,
+        type: 'mouse',
+        btn: 'left',
+        x: 0,
+        y: 0,
+        rel_x: 0,
+        rel_y: 0,
+        duration_ms: 0,
+        human_override: false,
+        metadata: {
+          ocr_primary_text_normalized: 'sunflowe',
+          ocr_anchor_norm_x: 0.42,
+          ocr_anchor_norm_y: 0,
+        },
+      },
+      { x: 120, y: 80, width: 800, height: 600 },
+      { x: 320, y: 120 },
+      0.6,
+      400
+    );
+    expect(clicked?.method).toBe('ocr');
+    expect(clicked?.coords).toEqual({ x: 372, y: 215 });
+    captureSpy.mockRestore();
+  });
+
   test('SmartClick clicks the visual match when the window moved and relative coords are off', async () => {
     const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('fake'));
     const movedWindow = { x: 500, y: 200, width: 800, height: 600 };
