@@ -994,7 +994,7 @@ def _wide_line_slices(image, occupied, focus_region):
     slices = []
     for contour in contours:
         x, y, width, height = cv2.boundingRect(contour)
-        if width <= 180 or width > 640 or height < 6 or height > 28:
+        if width <= 180 or width > image.shape[1] or height < 6 or height > 28:
             continue
         box = (int(x), int(y), int(width), int(height))
         if any(_boxes_overlap(box, kept) for kept in occupied):
@@ -1003,10 +1003,10 @@ def _wide_line_slices(image, occupied, focus_region):
             continue
         cursor = 0
         while cursor < width and len(slices) < 6:
-            piece = min(200, width - cursor)
+            piece = min(400, width - cursor)
             if piece >= 24:
                 slices.append((box[0] + cursor, box[1], int(piece), box[3]))
-            cursor += 160
+            cursor += 280
     return slices
 
 

@@ -870,6 +870,33 @@ def test_region_ocr_reads_a_long_line_outside_the_neighborhood():
     assert "deterministic" in words
 
 
+def test_region_ocr_reads_a_line_wider_than_640_outside_the_neighborhood():
+    app = create_app()
+    client = app.test_client()
+    page = np.full((800, 1100, 3), (251, 247, 245), dtype=np.uint8)
+    cursor = 40
+    for word in "Use this page for deterministic testing. Keep the browser UI stable.".split(" "):
+        cv2.putText(page, word, (cursor, 670), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (20, 20, 20), 1, cv2.LINE_AA)
+        (width, _height), _baseline = cv2.getTextSize(word, cv2.FONT_HERSHEY_SIMPLEX, 0.8, 1)
+        cursor += width + 8
+    res = client.post(
+        "/ocr",
+        json={
+            "image": to_base64(page),
+            "regions": True,
+            "timeoutMs": 800,
+            "focusX": 200,
+            "focusY": 40,
+            "query": "deterministic",
+        },
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    words = [item["text"].strip() for item in data["items"] if " " not in item["text"].strip()]
+    assert "deterministic" in words
+
+
 def test_match_endpoint_caps_find_all_work():
     app = create_app()
     client = app.test_client()
