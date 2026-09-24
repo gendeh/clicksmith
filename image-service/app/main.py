@@ -967,29 +967,91 @@ def _query_found(items, query):
     return True
 
 
+def _focus_region(image, focus_x, focus_y):
+    height, width = image.shape[:2]
+    if width < 96 or height < 96:
+        return None
+    try:
+        focus_x = float(focus_x)
+        focus_y = float(focus_y)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(focus_x) or not math.isfinite(focus_y):
+        return None
+    size = min(448, width, height)
+    half = size // 2
+    left = max(0, min(int(round(focus_x)) - half, width - size))
+    top = max(0, min(int(round(focus_y)) - half, height - size))
+    return (left, top, size, size)
+
+
+def _wide_line_slices(image, occupied, focus_region):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    ink = np.where(gray < 200, 255, 0).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    dilated = cv2.dilate(ink, kernel, iterations=1)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    slices = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if width <= 180 or width > 640 or height < 6 or height > 28:
+            continue
+        box = (int(x), int(y), int(width), int(height))
+        if any(_boxes_overlap(box, kept) for kept in occupied):
+            continue
+        if focus_region is not None and _boxes_overlap(box, focus_region):
+            continue
+        cursor = 0
+        while cursor < width and len(slices) < 6:
+            piece = min(200, width - cursor)
+            if piece >= 24:
+                slices.append((box[0] + cursor, box[1], int(piece), box[3]))
+            cursor += 160
+    return slices
+
+
 def recognize_rectangles(image, timeout_s, focus=None, query=None):
-    items = []
-    if focus is not None:
-        items.extend(_focus_items(image, focus[0], focus[1], timeout_s))
-        if query and _query_found(items, query):
-            return items[:MAX_OCR_ITEMS]
+    focus_pool = ThreadPoolExecutor(max_workers=1) if focus is not None else None
+    focus_future = (
+        focus_pool.submit(_focus_items, image, focus[0], focus[1], timeout_s)
+        if focus_pool is not None
+        else None
+    )
     boxes = text_rectangles(image)
     lines = text_line_boxes(image, boxes)
-    jobs = len(boxes) + (1 if lines else 0)
-    if jobs == 0:
+    focus_region = _focus_region(image, focus[0], focus[1]) if focus is not None else None
+    slices = _wide_line_slices(image, boxes, focus_region)
+    wide_pool = ThreadPoolExecutor(max_workers=1) if slices else None
+    wide_future = (
+        wide_pool.submit(_line_mosaic_items, image, slices, timeout_s) if wide_pool is not None else None
+    )
+    try:
+        items = []
+        if focus_future is not None:
+            items.extend(focus_future.result())
+            if query and _query_found(items, query):
+                return items[:MAX_OCR_ITEMS]
+        jobs = len(boxes) + (1 if lines else 0)
+        if jobs:
+            with ThreadPoolExecutor(max_workers=min(8, jobs)) as pool:
+                futures = [
+                    pool.submit(_ocr_image, image[y : y + height, x : x + width], x, y, timeout_s)
+                    for x, y, width, height in boxes
+                ]
+                if lines:
+                    futures.append(pool.submit(_line_mosaic_items, image, lines, timeout_s))
+                for future in futures:
+                    items.extend(future.result())
+                    if len(items) >= MAX_OCR_ITEMS:
+                        break
+        if wide_future is not None and len(items) < MAX_OCR_ITEMS:
+            items.extend(wide_future.result())
         return items[:MAX_OCR_ITEMS]
-    with ThreadPoolExecutor(max_workers=min(8, jobs)) as pool:
-        futures = [
-            pool.submit(_ocr_image, image[y : y + height, x : x + width], x, y, timeout_s)
-            for x, y, width, height in boxes
-        ]
-        if lines:
-            futures.append(pool.submit(_line_mosaic_items, image, lines, timeout_s))
-        for future in futures:
-            items.extend(future.result())
-            if len(items) >= MAX_OCR_ITEMS:
-                break
-    return items[:MAX_OCR_ITEMS]
+    finally:
+        if focus_pool is not None:
+            focus_pool.shutdown(wait=False, cancel_futures=True)
+        if wide_pool is not None:
+            wide_pool.shutdown(wait=False, cancel_futures=True)
 
 
 @app.route("/ocr", methods=["POST"])
