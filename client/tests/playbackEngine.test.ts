@@ -3859,4 +3859,80 @@ describe('PlaybackEngine', () => {
     expect(snapped).toHaveLength(1);
     expect(snapped[0]).toBeCloseTo(2000 / 240 - 2, 5);
   });
+
+  test('a prefetched click follows a window that moved before it is due', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('window'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.95,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    const holder = { bounds: { x: 100, y: 40, width: 800, height: 600 } };
+    const clicks: Array<{ x: number; y: number }> = [];
+    const engine = new PlaybackEngine({
+      inputPlayer: {
+        moveMouse: (x: number, y: number) => clicks.push({ x, y }),
+        mouseDown: () => undefined,
+        mouseUp: () => undefined,
+        keyDown: () => undefined,
+        keyUp: () => undefined,
+      } as any,
+      imageService: {
+        matchImage: jest.fn().mockResolvedValue({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 5,
+        }),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => holder.bounds,
+        getTargetBoundsAsync: async () => holder.bounds,
+        getKnownTargetBounds: () => holder.bounds,
+      } as any,
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      target_app: 'Terminal',
+      events: [
+        {
+          t_ms: 400,
+          type: 'mouse',
+          btn: 'left',
+          x: 190,
+          y: 110,
+          rel_x: 90 / 800,
+          rel_y: 70 / 600,
+          duration_ms: 0,
+          human_override: false,
+          img_patch_b64: Buffer.from('template').toString('base64'),
+        },
+      ],
+    };
+
+    await engine.start(
+      {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: true,
+        useRelativeCoords: true,
+        imageMatchThreshold: 0.6,
+        retryCount: 0,
+      },
+      profile
+    );
+    await jest.advanceTimersByTimeAsync(20);
+    holder.bounds = { x: 160, y: 90, width: 800, height: 600 };
+    await jest.advanceTimersByTimeAsync(450);
+
+    expect(clicks[0]).toEqual({ x: 250, y: 160 });
+    await engine.stop();
+    captureSpy.mockRestore();
+    jest.useRealTimers();
+  });
 });

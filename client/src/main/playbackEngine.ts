@@ -69,7 +69,10 @@ export class PlaybackEngine extends EventEmitter {
     private pauseStartedAt: number | null = null;
     private pausedDurationMs = 0;
     private readonly schedulerLookaheadMs = 2;
-    private smartClickResults = new Map<number, { coords: { x: number; y: number }; ready: boolean }>();
+    private smartClickResults = new Map<
+        number,
+        { coords: { x: number; y: number }; ready: boolean; bounds: WindowBounds | null }
+    >();
     private smartClickInFlight = new Set<number>();
     private smartClickPromises = new Map<number, Promise<{ x: number; y: number }>>();
     private smartClickTelemetry = new Map<number, { open: boolean }>();
@@ -530,7 +533,12 @@ export class PlaybackEngine extends EventEmitter {
         this.smartClickTelemetry.set(index, telemetry);
         const promise = this.resolveSmartClick(action.event, expected, true, telemetry)
             .then((coords: { x: number; y: number }) => {
-                this.smartClickResults.set(index, { coords, ready: true });
+                const bounds = this.smartClickAttemptBounds;
+                this.smartClickResults.set(index, {
+                    coords,
+                    ready: true,
+                    bounds: bounds ? { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height } : null,
+                });
                 return coords;
             })
             .finally(() => {
@@ -541,10 +549,18 @@ export class PlaybackEngine extends EventEmitter {
         this.smartClickPromises.set(index, promise);
     }
 
+    private sameWindowBounds(a: WindowBounds | null, b: WindowBounds | null): boolean {
+        if (!a || !b) return a === b;
+        return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
+    }
+
     private async getSmartClickCoords(index: number, event: RecordedEvent, expected: { x: number; y: number }) {
         const cached = this.smartClickResults.get(index);
         if (cached?.ready) {
-            return cached.coords;
+            if (this.sameWindowBounds(cached.bounds, this.getSmartClickTargetBoundsSync())) {
+                return cached.coords;
+            }
+            this.smartClickResults.delete(index);
         }
 
         const inflight = this.smartClickPromises.get(index);
