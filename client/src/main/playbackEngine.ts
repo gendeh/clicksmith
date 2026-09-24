@@ -1,5 +1,5 @@
 import { EventEmitter } from 'events';
-import { MatchResult, PlaybackConfig, PlaybackStatus, Profile, RecordedEvent, WindowBounds } from '../types';
+import { MatchResult, OcrItem, PlaybackConfig, PlaybackStatus, Profile, RecordedEvent, WindowBounds } from '../types';
 import { ImageService } from '../services/imageService';
 import { InputPlayer } from './inputPlayer';
 import { WindowManager } from './windowManager';
@@ -870,6 +870,16 @@ export class PlaybackEngine extends EventEmitter {
         return '';
     }
 
+    private async readOcrItems(image: Buffer, timeoutMs: number, regions = false): Promise<OcrItem[]> {
+        const response = await this.imageService.ocrImage({
+            image: image.toString('base64'),
+            timeoutMs,
+            regions,
+        });
+        if (!response.success || !response.items?.length) return [];
+        return response.items;
+    }
+
     private async ocrNeighborhood(
         image: Buffer,
         stageRegion: WindowBounds,
@@ -922,7 +932,8 @@ export class PlaybackEngine extends EventEmitter {
         const offsetNormX = typeof metadata?.ocr_anchor_norm_x === 'number' ? metadata.ocr_anchor_norm_x : 0;
         const offsetNormY = typeof metadata?.ocr_anchor_norm_y === 'number' ? metadata.ocr_anchor_norm_y : 0;
         const image = capturedImage ?? await captureRegion(stageRegion);
-        if (Math.max(stageRegion.width, stageRegion.height) > 960) {
+        let items: OcrItem[] = [];
+        if (!capturedImage && Math.max(stageRegion.width, stageRegion.height) > 960) {
             const neighborhood = await this.ocrNeighborhood(image, stageRegion, expected);
             if (neighborhood) {
                 const picked = await this.tryOcrSmartClickFallback(
@@ -935,20 +946,17 @@ export class PlaybackEngine extends EventEmitter {
                 );
                 if (picked) return picked;
             }
+            items = await this.readOcrItems(image, Math.max(timeoutMs, 340), true);
+        } else {
+            items = await this.readOcrItems(image, timeoutMs);
         }
-        const response = await this.imageService.ocrImage({
-            image: image.toString('base64'),
-            timeoutMs,
-        });
-        if (!response.success || !response.items?.length) {
-            return null;
-        }
+        if (!items.length) return null;
         const phraseTokens = rawText
             .split(' ')
             .filter(token => token.length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN);
         const wordCounts = new Map<string, number>();
-        const pageWords: Array<{ text: string; item: (typeof response.items)[number] }> = [];
-        for (const item of response.items) {
+        const pageWords: Array<{ text: string; item: OcrItem }> = [];
+        for (const item of items) {
             const candidateText = this.normalizeOcrText(item.text);
             if (!candidateText || candidateText.includes(' ') || candidateText === rawText) continue;
             if (candidateText.length < PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN) continue;
@@ -1001,7 +1009,7 @@ export class PlaybackEngine extends EventEmitter {
         }
         let best: SmartClickCandidateSelection | null = null;
         let bestScore = 0;
-        for (const item of response.items) {
+        for (const item of items) {
             const candidateText = this.normalizeOcrText(item.text);
             if (!candidateText) continue;
             const similarity = this.computeOcrSimilarity(rawText, candidateText);

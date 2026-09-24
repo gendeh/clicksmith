@@ -3,6 +3,7 @@ import binascii
 import math
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -676,6 +677,140 @@ def match_image():
         return jsonify({"error": str(exc)}), 500
 
 
+def items_from_tesseract(data_dict, ocr_scale, origin_x=0, origin_y=0):
+    line_map = {}
+    words = []
+    for idx, raw_text in enumerate(data_dict.get("text", [])):
+        item_text = (raw_text or "").strip()
+        try:
+            confidence = float(data_dict.get("conf", [0])[idx])
+        except (TypeError, ValueError):
+            confidence = 0.0
+        if not item_text or confidence < 0:
+            continue
+        left = origin_x + int(round(int(data_dict.get("left", [0])[idx]) / ocr_scale))
+        top = origin_y + int(round(int(data_dict.get("top", [0])[idx]) / ocr_scale))
+        width = int(round(int(data_dict.get("width", [0])[idx]) / ocr_scale))
+        height = int(round(int(data_dict.get("height", [0])[idx]) / ocr_scale))
+        words.append(
+            {
+                "text": item_text,
+                "confidence": confidence,
+                "bounds": {
+                    "x": left,
+                    "y": top,
+                    "width": int(max(1, width)),
+                    "height": int(max(1, height)),
+                },
+            }
+        )
+        key = (
+            int(data_dict.get("block_num", [0])[idx]),
+            int(data_dict.get("par_num", [0])[idx]),
+            int(data_dict.get("line_num", [0])[idx]),
+        )
+        line = line_map.setdefault(
+            key,
+            {
+                "texts": [],
+                "confidences": [],
+                "left": left,
+                "top": top,
+                "right": left + width,
+                "bottom": top + height,
+            },
+        )
+        line["texts"].append(item_text)
+        line["confidences"].append(confidence)
+        line["left"] = min(line["left"], left)
+        line["top"] = min(line["top"], top)
+        line["right"] = max(line["right"], left + width)
+        line["bottom"] = max(line["bottom"], top + height)
+
+    items = []
+    line_texts = []
+    for line in line_map.values():
+        line_text = " ".join(line["texts"]).strip()
+        if not line_text:
+            continue
+        line_texts.append(line_text)
+        items.append(
+            {
+                "text": line_text,
+                "confidence": float(sum(line["confidences"]) / max(1, len(line["confidences"]))),
+                "bounds": {
+                    "x": int(line["left"]),
+                    "y": int(line["top"]),
+                    "width": int(max(1, line["right"] - line["left"])),
+                    "height": int(max(1, line["bottom"] - line["top"])),
+                },
+            }
+        )
+        if len(items) >= MAX_OCR_ITEMS:
+            return items, "\n".join(line_texts)
+    for word in words:
+        if len(items) >= MAX_OCR_ITEMS:
+            break
+        items.append(word)
+    return items, "\n".join(line_texts)
+
+
+def text_rectangles(image):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 40, 120)
+    contours, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    boxes = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if width < 60 or height < 16 or width > 340 or height > 90:
+            continue
+        if any(abs(x - kept[0]) < 8 and abs(y - kept[1]) < 8 for kept in boxes):
+            continue
+        boxes.append((int(x), int(y), int(width), int(height)))
+        if len(boxes) >= 24:
+            break
+    return boxes
+
+
+def recognize_rectangles(image, timeout_s):
+    boxes = text_rectangles(image)
+
+    def read_box(box):
+        x, y, width, height = box
+        crop = image[y : y + height, x : x + width]
+        if crop.size == 0:
+            return []
+        crop_height, crop_width = crop.shape[:2]
+        ocr_scale = 2 if 96 <= max(crop_height, crop_width) <= 448 else 1
+        scaled = crop
+        if ocr_scale != 1:
+            scaled = cv2.resize(
+                crop,
+                (crop_width * ocr_scale, crop_height * ocr_scale),
+                interpolation=cv2.INTER_CUBIC,
+            )
+        try:
+            data_dict = pytesseract.image_to_data(
+                scaled,
+                output_type=Output.DICT,
+                timeout=timeout_s,
+            )
+        except Exception:
+            return []
+        items, _line_text = items_from_tesseract(data_dict, ocr_scale, x, y)
+        return items
+
+    if not boxes:
+        return []
+    items = []
+    with ThreadPoolExecutor(max_workers=min(6, len(boxes))) as pool:
+        for batch in pool.map(read_box, boxes):
+            items.extend(batch)
+            if len(items) >= MAX_OCR_ITEMS:
+                break
+    return items[:MAX_OCR_ITEMS]
+
+
 @app.route("/ocr", methods=["POST"])
 def ocr():
     start_time = time.time()
@@ -685,6 +820,18 @@ def ocr():
             return jsonify({"error": "Missing image"}), 400
 
         image = base64_to_cv2(data["image"], max_pixels=MAX_OCR_PIXELS)
+        if data.get("regions"):
+            items = recognize_rectangles(image, requested_ocr_timeout_seconds(data))
+            processing_ms = int((time.time() - start_time) * 1000)
+            text = "\n".join(item["text"] for item in items)[:MAX_OCR_TEXT_CHARS]
+            return jsonify(
+                {
+                    "success": True,
+                    "text": text,
+                    "items": items,
+                    "processingTimeMs": processing_ms,
+                }
+            )
         source_height, source_width = image.shape[:2]
         ocr_scale = 2 if 96 <= max(source_height, source_width) <= 448 else 1
         if ocr_scale != 1:
@@ -698,83 +845,8 @@ def ocr():
             output_type=Output.DICT,
             timeout=requested_ocr_timeout_seconds(data),
         )
-
-        line_map = {}
-        words = []
-        for idx, raw_text in enumerate(data_dict.get("text", [])):
-            item_text = (raw_text or "").strip()
-            try:
-                confidence = float(data_dict.get("conf", [0])[idx])
-            except (TypeError, ValueError):
-                confidence = 0.0
-            if not item_text:
-                continue
-            if confidence < 0:
-                continue
-            left = int(round(int(data_dict.get("left", [0])[idx]) / ocr_scale))
-            top = int(round(int(data_dict.get("top", [0])[idx]) / ocr_scale))
-            width = int(round(int(data_dict.get("width", [0])[idx]) / ocr_scale))
-            height = int(round(int(data_dict.get("height", [0])[idx]) / ocr_scale))
-            words.append(
-                {
-                    "text": item_text,
-                    "confidence": confidence,
-                    "bounds": {
-                        "x": left,
-                        "y": top,
-                        "width": int(max(1, width)),
-                        "height": int(max(1, height)),
-                    },
-                }
-            )
-            key = (
-                int(data_dict.get("block_num", [0])[idx]),
-                int(data_dict.get("par_num", [0])[idx]),
-                int(data_dict.get("line_num", [0])[idx]),
-            )
-            line = line_map.setdefault(
-                key,
-                {
-                    "texts": [],
-                    "confidences": [],
-                    "left": left,
-                    "top": top,
-                    "right": left + width,
-                    "bottom": top + height,
-                },
-            )
-            line["texts"].append(item_text)
-            line["confidences"].append(confidence)
-            line["left"] = min(line["left"], left)
-            line["top"] = min(line["top"], top)
-            line["right"] = max(line["right"], left + width)
-            line["bottom"] = max(line["bottom"], top + height)
-
-        items = []
-        for line in line_map.values():
-            line_text = " ".join(line["texts"]).strip()
-            if not line_text:
-                continue
-            items.append(
-                {
-                    "text": line_text,
-                    "confidence": float(sum(line["confidences"]) / max(1, len(line["confidences"]))),
-                    "bounds": {
-                        "x": int(line["left"]),
-                        "y": int(line["top"]),
-                        "width": int(max(1, line["right"] - line["left"])),
-                        "height": int(max(1, line["bottom"] - line["top"])),
-                    },
-                }
-            )
-            if len(items) >= MAX_OCR_ITEMS:
-                break
-
-        text = "\n".join(item["text"] for item in items)[:MAX_OCR_TEXT_CHARS]
-        for word in words:
-            if len(items) >= MAX_OCR_ITEMS:
-                break
-            items.append(word)
+        items, text = items_from_tesseract(data_dict, ocr_scale)
+        text = text[:MAX_OCR_TEXT_CHARS]
 
         processing_ms = int((time.time() - start_time) * 1000)
         return jsonify(

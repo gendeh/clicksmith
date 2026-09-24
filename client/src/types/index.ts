@@ -456,6 +456,8 @@ export interface ImageOcrRequest {
   image: string;
   /** Optional request timeout in ms */
   timeoutMs?: number;
+  /** Read text-sized rectangles instead of the whole image. */
+  regions?: boolean;
 }
 
 export interface ImageOcrResponse {

@@ -792,6 +792,24 @@ def test_small_context_crop_reads_mint_and_ocean():
         assert any(word in line for line in lines)
 
 
+def test_region_ocr_reads_a_button_below_the_neighborhood():
+    app = create_app()
+    client = app.test_client()
+    page = np.full((800, 1100, 3), (251, 247, 245), dtype=np.uint8)
+    button = _button("Target D: Coral", (226, 226, 254))
+    x, y = 567, 510
+    height, width = button.shape[:2]
+    page[y : y + height, x : x + width] = button
+    res = client.post("/ocr", json={"image": to_base64(page), "regions": True, "timeoutMs": 800})
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    coral = next(item for item in data["items"] if item["text"].strip().lower() == "coral")
+    bounds = coral["bounds"]
+    assert x - 8 <= bounds["x"] <= x + width
+    assert y - 8 <= bounds["y"] <= y + height
+
+
 def test_match_endpoint_caps_find_all_work():
     app = create_app()
     client = app.test_client()
