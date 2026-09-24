@@ -114,6 +114,9 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_OCR_MIN_TEXT_LEN = 2;
     private static readonly SMART_CLICK_OCR_RESERVE_MS = 120;
     private static readonly SMART_CLICK_CONTEXT_RESERVE_MS = 80;
+    private static readonly SMART_CLICK_SCREEN_LOOKALIKE_CONFIDENCE = 0.30;
+    private static readonly SMART_CLICK_MATCH_RESPONSE_GRACE_MS = 40;
+    private static readonly SMART_CLICK_SCREEN_TEXT_REGION_BUDGET_MS = 100;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
     private smartClickAnchor: { dx: number; dy: number } | null = null;
@@ -1672,6 +1675,7 @@ export class PlaybackEngine extends EventEmitter {
         }
 
         if (viable.length === 0) return null;
+        if (!viable.some((candidate) => candidate.confidence >= baseThreshold)) return null;
 
         const preHashRanked = this.rankSmartClickCandidates(
             viable,
@@ -2001,6 +2005,8 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
+            let screenRegionConfidence = 0;
+            let screenRegionUnresolved = false;
             if (imageStageOpen()) {
                 const searchCenter = fallbackCoords;
                 const region = clipNeighborhood(searchCenter, searchRadius);
@@ -2010,9 +2016,15 @@ export class PlaybackEngine extends EventEmitter {
                     ? Math.min(stageBudgetMs('region'), imageBudgetLeftMs())
                     : Math.max(
                           20,
-                          imageBudgetLeftMs() -
-                              (event.img_context_b64 ? PlaybackEngine.SMART_CLICK_CONTEXT_RESERVE_MS : 0)
+                          Math.min(
+                              imageBudgetLeftMs() -
+                                  (event.img_context_b64 ? PlaybackEngine.SMART_CLICK_CONTEXT_RESERVE_MS : 0),
+                              ocrReserveMs > 0
+                                  ? PlaybackEngine.SMART_CLICK_SCREEN_TEXT_REGION_BUDGET_MS
+                                  : imageBudgetLeftMs()
+                          )
                       );
+                const regionTimeoutMs = Math.max(20, Math.min(requestTimeoutMs, regionBudget));
                 const regionResponse = await this.imageService.matchImage({
                     template: templateForMatch,
                     templateHash,
@@ -2021,7 +2033,9 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'hybrid',
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_REGION_CANDIDATES,
-                    timeoutMs: Math.max(20, Math.min(requestTimeoutMs, regionBudget)),
+                    timeoutMs: preferredBounds
+                        ? regionTimeoutMs
+                        : regionTimeoutMs + PlaybackEngine.SMART_CLICK_MATCH_RESPONSE_GRACE_MS,
                     minScale: scaleWindow.minScale,
                     maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
@@ -2033,6 +2047,8 @@ export class PlaybackEngine extends EventEmitter {
                     return fallbackCoords;
                 }
                 const regionCandidates = this.getMatchCandidates(regionResponse);
+                screenRegionConfidence = regionCandidates[0]?.confidence ?? 0;
+                screenRegionUnresolved = regionCandidates.length === 0 && Boolean(regionResponse.error);
                 const pickedRegion = await this.pickBestSmartClickCandidate(
                     'region',
                     'strict',
@@ -2209,6 +2225,142 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
+            let fullscreenSearched = false;
+            const searchFullscreen = async (holdOcrReserve: boolean): Promise<{ x: number; y: number } | null> => {
+                const fullscreenBudget = Math.min(
+                    stageBudgetMs('fullscreen'),
+                    holdOcrReserve ? imageBudgetLeftMs() : budgetLeftMs()
+                );
+                if (timedOut() || fullscreenBudget < 20) return null;
+                fullscreenSearched = true;
+                const fullScreen = await captureForMatch(() => captureScreen());
+                const fullscreenTimeoutMs = Math.max(20, Math.min(requestTimeoutMs, fullscreenBudget));
+                const fullResponse = await this.imageService.matchImage({
+                    template: templateForMatch,
+                    templateHash,
+                    searchArea: fullScreen.toString('base64'),
+                    threshold: holdOcrReserve
+                        ? Math.min(fullscreenThreshold, collectionMinConfidence)
+                        : fullscreenThreshold,
+                    method: holdOcrReserve ? 'hybrid' : 'template',
+                    findAll: true,
+                    maxMatches: PlaybackEngine.SMART_CLICK_MAX_FULLSCREEN_CANDIDATES,
+                    timeoutMs: fullscreenTimeoutMs,
+                    minScale: scaleWindow.minScale,
+                    maxScale: scaleWindow.maxScale,
+                    scaleHint: this.smartClickScaleHint ?? 1.0,
+                    maxBudgetMs: fullscreenBudget,
+                });
+                const fullError = String(fullResponse.error ?? '');
+                if (this.isServiceUnavailableErrorText(fullError)) {
+                    this.markServiceUnavailableFallback();
+                    return fallbackCoords;
+                }
+                const fullCandidates = this.getMatchCandidates(fullResponse);
+                const pickedFullscreen = await this.pickBestSmartClickCandidate(
+                    'fullscreen',
+                    'relaxed',
+                    event,
+                    expected,
+                    fullCandidates,
+                    fullscreenThreshold,
+                    { x: desktopBounds.x, y: desktopBounds.y },
+                    PlaybackEngine.SMART_CLICK_MAX_FULLSCREEN_CANDIDATES,
+                    preferredBounds,
+                    { image: fullScreen, offsetX: desktopBounds.x, offsetY: desktopBounds.y },
+                    {
+                        adaptationMode,
+                        maxFeatureJumpPx: adaptationMode ? Math.max(900, searchRadius * 2) : Math.max(280, searchRadius),
+                    }
+                );
+                this.traceSmartClick('stage_fullscreen', {
+                    candidates: fullCandidates.length,
+                    picked: !!pickedFullscreen,
+                    pickedMethod: pickedFullscreen?.method,
+                    pickedConf: pickedFullscreen ? Number(pickedFullscreen.confidence.toFixed(3)) : undefined,
+                    pickedScale: pickedFullscreen?.scale,
+                    bestConf:
+                        fullCandidates.length > 0
+                            ? Number(fullCandidates[0].confidence.toFixed(3))
+                            : undefined,
+                    bestMethod: fullCandidates[0]?.method,
+                });
+                if (!pickedFullscreen) {
+                    const suggestedScale = this.maybeAdaptToScaleEvidence(
+                        'fullscreen',
+                        fullCandidates,
+                        fullscreenThreshold,
+                        allowRestart
+                    );
+                    if (suggestedScale !== null) {
+                        return this.resolveSmartClick(event, expected, false, telemetry, budgetDeadline, attempt);
+                    }
+                    return null;
+                }
+                if (!telemetry.open) return pickedFullscreen.coords;
+                const fullscreenRegion = {
+                    x: desktopBounds.x,
+                    y: desktopBounds.y,
+                    width: desktopBounds.width,
+                    height: desktopBounds.height,
+                };
+                const confirmed = this.shouldConfirmScaledPick(adaptationMode, pickedFullscreen, 'fullscreen')
+                    ? await this.confirmScaledPick(
+                          'fullscreen',
+                          event,
+                          expected,
+                          pickedFullscreen,
+                          fullscreenRegion,
+                          preferredBounds,
+                          adaptationMode,
+                          fullscreenThreshold,
+                          fullscreenTimeoutMs,
+                          fullscreenBudget
+                      )
+                    : true;
+                if (!confirmed) {
+                    this.registerSmartClickFailure();
+                    return fallbackCoords;
+                }
+                if (
+                    (!adaptationMode || pickedFullscreen.confidence >= 0.80) &&
+                    !this.hasMeaningfulScaleShift(pickedFullscreen.scale)
+                ) {
+                    this.setSmartClickAnchor(relativeFallback ?? expected, pickedFullscreen.coords);
+                } else if (this.smartClickAnchor) {
+                    this.clearSmartClickAnchor();
+                }
+                this.recordSmartClickStableScale(pickedFullscreen.scale);
+                this.updateSmartClickScaleHint(pickedFullscreen.scale);
+                this.smartClickConsecutiveFailures = 0;
+                if (this.smartClickAdaptationClicksLeft > 0) {
+                    this.smartClickAdaptationClicksLeft = Math.max(0, this.smartClickAdaptationClicksLeft - 1);
+                }
+                this.status = {
+                    ...this.status,
+                    successfulMatches: this.status.successfulMatches + 1,
+                    lastError: this.status.lastError === 'image_service_unavailable' ? undefined : this.status.lastError,
+                    smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
+                };
+                this.markSmartClickSource(
+                    'fullscreen',
+                    pickedFullscreen.method,
+                    pickedFullscreen.confidence,
+                    pickedFullscreen.dhashDistance,
+                    pickedFullscreen.scale
+                );
+                return pickedFullscreen.coords;
+            };
+            if (
+                !preferredBounds &&
+                (screenRegionUnresolved ||
+                    (screenRegionConfidence >= PlaybackEngine.SMART_CLICK_SCREEN_LOOKALIKE_CONFIDENCE &&
+                        screenRegionConfidence < fullscreenThreshold))
+            ) {
+                const earlyFullscreen = await searchFullscreen(false);
+                if (earlyFullscreen) return earlyFullscreen;
+            }
+
             const hasRecordedText =
                 this.recordedOcrQuery(event).length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN;
             if (!timedOut() && (preferredBounds || hasRecordedText)) {
@@ -2272,125 +2424,11 @@ export class PlaybackEngine extends EventEmitter {
                 }
             }
 
-            if (imageStageOpen()) {
-                const fullScreen = await captureForMatch(() => captureScreen());
-                const fullscreenBudget = Math.min(stageBudgetMs('fullscreen'), imageBudgetLeftMs());
-                const fullscreenTimeoutMs = Math.max(20, Math.min(requestTimeoutMs, fullscreenBudget));
-                const fullResponse = await this.imageService.matchImage({
-                    template: templateForMatch,
-                    templateHash,
-                    searchArea: fullScreen.toString('base64'),
-                    threshold: Math.min(fullscreenThreshold, collectionMinConfidence),
-                    method: 'hybrid',
-                    findAll: true,
-                    maxMatches: PlaybackEngine.SMART_CLICK_MAX_FULLSCREEN_CANDIDATES,
-                    timeoutMs: fullscreenTimeoutMs,
-                    minScale: scaleWindow.minScale,
-                    maxScale: scaleWindow.maxScale,
-                    scaleHint: this.smartClickScaleHint ?? 1.0,
-                    maxBudgetMs: fullscreenBudget,
-                });
-                const fullError = String(fullResponse.error ?? '');
-                if (this.isServiceUnavailableErrorText(fullError)) {
-                    this.markServiceUnavailableFallback();
-                    return fallbackCoords;
-                }
-                const fullCandidates = this.getMatchCandidates(fullResponse);
-                const pickedFullscreen = await this.pickBestSmartClickCandidate(
-                    'fullscreen',
-                    'relaxed',
-                    event,
-                    expected,
-                    fullCandidates,
-                    fullscreenThreshold,
-                    { x: desktopBounds.x, y: desktopBounds.y },
-                    PlaybackEngine.SMART_CLICK_MAX_FULLSCREEN_CANDIDATES,
-                    preferredBounds,
-                    { image: fullScreen, offsetX: desktopBounds.x, offsetY: desktopBounds.y },
-                    {
-                        adaptationMode,
-                        maxFeatureJumpPx: adaptationMode ? Math.max(900, searchRadius * 2) : Math.max(280, searchRadius),
-                    }
-                );
-                this.traceSmartClick('stage_fullscreen', {
-                    candidates: fullCandidates.length,
-                    picked: !!pickedFullscreen,
-                    pickedMethod: pickedFullscreen?.method,
-                    pickedConf: pickedFullscreen ? Number(pickedFullscreen.confidence.toFixed(3)) : undefined,
-                    pickedScale: pickedFullscreen?.scale,
-                    bestConf:
-                        fullCandidates.length > 0
-                            ? Number(fullCandidates[0].confidence.toFixed(3))
-                            : undefined,
-                    bestMethod: fullCandidates[0]?.method,
-                });
-                if (!pickedFullscreen) {
-                    const suggestedScale = this.maybeAdaptToScaleEvidence(
-                        'fullscreen',
-                        fullCandidates,
-                        fullscreenThreshold,
-                        allowRestart
-                    );
-                    if (suggestedScale !== null) {
-                        return this.resolveSmartClick(event, expected, false, telemetry, budgetDeadline, attempt);
-                    }
-                }
-                if (pickedFullscreen) {
-                    if (!telemetry.open) return pickedFullscreen.coords;
-                    const fullscreenRegion = {
-                        x: desktopBounds.x,
-                        y: desktopBounds.y,
-                        width: desktopBounds.width,
-                        height: desktopBounds.height,
-                    };
-                    const confirmed = this.shouldConfirmScaledPick(adaptationMode, pickedFullscreen, 'fullscreen')
-                        ? await this.confirmScaledPick(
-                              'fullscreen',
-                              event,
-                              expected,
-                              pickedFullscreen,
-                              fullscreenRegion,
-                              preferredBounds,
-                              adaptationMode,
-                              fullscreenThreshold,
-                              fullscreenTimeoutMs,
-                              fullscreenBudget
-                          )
-                        : true;
-                    if (!confirmed) {
-                        this.registerSmartClickFailure();
-                        return fallbackCoords;
-                    }
-                    if (
-                        (!adaptationMode || pickedFullscreen.confidence >= 0.80) &&
-                        !this.hasMeaningfulScaleShift(pickedFullscreen.scale)
-                    ) {
-                        this.setSmartClickAnchor(relativeFallback ?? expected, pickedFullscreen.coords);
-                    } else if (this.smartClickAnchor) {
-                        this.clearSmartClickAnchor();
-                    }
-                    this.recordSmartClickStableScale(pickedFullscreen.scale);
-                    this.updateSmartClickScaleHint(pickedFullscreen.scale);
-                    this.smartClickConsecutiveFailures = 0;
-                    if (this.smartClickAdaptationClicksLeft > 0) {
-                        this.smartClickAdaptationClicksLeft = Math.max(0, this.smartClickAdaptationClicksLeft - 1);
-                    }
-                    this.status = {
-                        ...this.status,
-                        successfulMatches: this.status.successfulMatches + 1,
-                        lastError: this.status.lastError === 'image_service_unavailable' ? undefined : this.status.lastError,
-                        smartClickAdaptationClicksLeft: this.smartClickAdaptationClicksLeft,
-                    };
-                    this.markSmartClickSource(
-                        'fullscreen',
-                        pickedFullscreen.method,
-                        pickedFullscreen.confidence,
-                        pickedFullscreen.dhashDistance,
-                        pickedFullscreen.scale
-                    );
-                    return pickedFullscreen.coords;
-                }
+            if (!fullscreenSearched && imageStageOpen()) {
+                const lateFullscreen = await searchFullscreen(true);
+                if (lateFullscreen) return lateFullscreen;
             }
+
 
         } catch (error: any) {
             if (!telemetry.open) {
