@@ -554,6 +554,17 @@ export class PlaybackEngine extends EventEmitter {
         return a.x === b.x && a.y === b.y && a.width === b.width && a.height === b.height;
     }
 
+    private knownWindowBounds(): WindowBounds | null | undefined {
+        if (!this.config?.useImageMatching) return undefined;
+        const normalizedTarget = (this.config.target || '').trim().toLowerCase();
+        if (!normalizedTarget || normalizedTarget === 'screen') return null;
+        const knownLookup = (this.windowManager as {
+            getKnownTargetBounds?: (target: string) => WindowBounds | null;
+        }).getKnownTargetBounds;
+        if (typeof knownLookup !== 'function') return undefined;
+        return knownLookup.call(this.windowManager, this.config.target);
+    }
+
     private async getSmartClickCoords(index: number, event: RecordedEvent, expected: { x: number; y: number }) {
         const cached = this.smartClickResults.get(index);
         if (cached?.ready) {
@@ -565,7 +576,17 @@ export class PlaybackEngine extends EventEmitter {
 
         const inflight = this.smartClickPromises.get(index);
         if (inflight) {
-            return this.finishSmartClickWait(inflight, event, expected, this.smartClickTelemetry.get(index));
+            const telemetry = this.smartClickTelemetry.get(index);
+            const coords = await this.finishSmartClickWait(inflight, event, expected, telemetry);
+            const live = this.knownWindowBounds();
+            if (
+                !telemetry?.open ||
+                live === undefined ||
+                this.sameWindowBounds(this.smartClickAttemptBounds, live)
+            ) {
+                return coords;
+            }
+            this.smartClickResults.delete(index);
         }
 
         const telemetry = { open: true };
