@@ -34,14 +34,11 @@ export class CoordinateNormalizer {
 
     private static registerDisplayListeners() {
         if (this.displayListenersRegistered) return;
+        if (typeof screen.on !== 'function') return;
         this.displayListenersRegistered = true;
-        try {
-            screen.on('display-added', () => this.invalidateVirtualBoundsCache());
-            screen.on('display-removed', () => this.invalidateVirtualBoundsCache());
-            screen.on('display-metrics-changed', () => this.invalidateVirtualBoundsCache());
-        } catch {
-            // Tests can mock Electron's screen without EventEmitter support.
-        }
+        screen.on('display-added', () => this.invalidateVirtualBoundsCache());
+        screen.on('display-removed', () => this.invalidateVirtualBoundsCache());
+        screen.on('display-metrics-changed', () => this.invalidateVirtualBoundsCache());
     }
 
     public static getVirtualLogicalBounds(): Rect {

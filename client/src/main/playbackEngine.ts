@@ -1771,7 +1771,6 @@ export class PlaybackEngine extends EventEmitter {
         }
 
         const isBootstrap = this.smartClickAnchor === null;
-        // Always match with the primary small patch; context patch is reserved for future reranking.
         const templateForMatch = event.img_patch_b64;
         const templateHash = event.img_hash;
         const threshold = Math.max(0, Math.min(1, config.imageMatchThreshold));

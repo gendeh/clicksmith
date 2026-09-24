@@ -54,8 +54,6 @@ def base64_to_cv2(b64_string, *, max_decoded_bytes=MAX_IMAGE_BYTES, max_pixels=M
 
 def _match_template_direct(template, search_area, threshold, find_all, max_matches, template_scale=1.0):
     template_gray = cv2.cvtColor(template, cv2.COLOR_BGR2GRAY)
-    # Constant/low-variance templates can produce misleading high scores with CCOEFF.
-    # Switch to SQDIFF mode (inverted to score map) for those cases.
     low_variance = float(np.std(template_gray)) < 6.0
     method = cv2.TM_SQDIFF_NORMED if low_variance else cv2.TM_CCOEFF_NORMED
     raw = cv2.matchTemplate(search_area, template, method)
@@ -66,8 +64,6 @@ def _match_template_direct(template, search_area, threshold, find_all, max_match
 
     matches = []
     if find_all:
-        # Extract top-k local maxima instead of scanning every threshold hit.
-        # This keeps full-screen SmartClick queries bounded and fast.
         work = score.copy()
         limit = max(1, min(MAX_MATCHES, int(max_matches)))
         for _ in range(limit):
@@ -222,12 +218,10 @@ def build_scale_candidates(min_scale, max_scale, scale_hint, step=0.08):
         grid_values.append(round(current, 3))
         current += step
 
-    # Common UI/browser zoom steps improve hit-rate without forcing a dense full sweep.
     common_steps = [0.67, 0.75, 0.8, 0.9, 1.0, 1.1, 1.25, 1.33, 1.5, 1.67, 1.75, 2.0]
     in_range_common = [round(v, 3) for v in common_steps if min_scale <= v <= max_scale]
 
     preferred = [round(scale_hint, 3), round(min_scale, 3), round(max_scale, 3)]
-    # When hint is near 1.0, aggressively probe browser zoom pivots early.
     if abs(scale_hint - 1.0) <= 0.08:
         preferred.extend([1.1, 0.9, 1.2, 0.67, 0.8, 1.25, 0.75, 1.33, 1.5, 1.67, 2.0])
     elif scale_hint < 1.0:

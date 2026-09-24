@@ -280,23 +280,14 @@ export interface PlaybackStatus {
   reliabilityScore?: number;
   /** Last error message */
   lastError?: string;
-  /** SmartClick debug: source used for the most recent coordinate decision */
   smartClickLastSource?: string;
-  /** SmartClick debug: matcher type used for the most recent accepted candidate */
   smartClickLastMethod?: string;
-  /** SmartClick debug: confidence of the most recent successful match */
   smartClickLastConfidence?: number;
-  /** SmartClick debug: selected match scale from the most recent successful match */
   smartClickLastScale?: number;
-  /** SmartClick debug: baseline recorded scale domain used for this playback run */
   smartClickRecordedScale?: number;
-  /** SmartClick debug: last accepted stable scale used to steer zoom matching */
   smartClickLastStableScale?: number;
-  /** SmartClick debug: current rolling scale hint used for multiscale matching */
   smartClickScaleHint?: number;
-  /** SmartClick debug: why adaptation mode was entered */
   smartClickAdaptationReason?: string;
-  /** SmartClick debug: dHash distance of the last accepted candidate */
   smartClickLastDHashDistance?: number;
   /** SmartClick debug: anchor offset currently applied to expected coordinates */
   smartClickAnchorDx?: number;
@@ -308,7 +299,6 @@ export interface PlaybackStatus {
   smartClickRegionMinConfidence?: number;
   /** SmartClick debug: effective minimum confidence for fullscreen matching */
   smartClickFullscreenMinConfidence?: number;
-  /** SmartClick debug: clicks remaining in adaptation mode */
   smartClickAdaptationClicksLeft?: number;
 }
 
@@ -376,11 +366,9 @@ export interface ScreenInfo {
 export interface ImageMatchRequest {
   /** Template image (base64) */
   template: string;
-  /** Optional precomputed hash for template image */
   templateHash?: string;
   /** Search area image (base64) or full screen if omitted */
   searchArea?: string;
-  /** Optional precomputed hash for search area image */
   searchAreaHash?: string;
   /** Confidence threshold (0-1) */
   threshold: number;
@@ -390,13 +378,9 @@ export interface ImageMatchRequest {
   findAll: boolean;
   /** Maximum matches to return */
   maxMatches: number;
-  /** Optional request timeout in ms */
   timeoutMs?: number;
-  /** Minimum template scale to test for zoom adaptation */
   minScale?: number;
-  /** Maximum template scale to test for zoom adaptation */
   maxScale?: number;
-  /** Preferred template scale hint for zoom adaptation */
   scaleHint?: number;
   /** Maximum budget for matcher-side multi-scale work in ms */
   maxBudgetMs?: number;
@@ -412,15 +396,11 @@ export interface MatchResult {
   y: number;
   /** Match confidence (0-1) */
   confidence: number;
-  /** Matcher family for this candidate (template/feature) */
   method?: 'template' | 'feature' | 'hybrid' | string;
-  /** Optional backend score (for hybrid ranking) */
   score?: number;
   /** Scale used for this candidate (1.0 = recorded scale) */
   scale?: number;
-  /** Optional feature-match inlier count */
   inliers?: number;
-  /** Whether the feature match used a homography solution */
   homography_ok?: boolean;
   /** Match bounds */
   bounds: WindowBounds;
@@ -443,18 +423,15 @@ export interface ImageMatchResponse {
 }
 
 export interface OcrItem {
-  /** Recognized text for this OCR segment */
   text: string;
   /** OCR confidence (0-100) */
   confidence: number;
-  /** Bounding box of the OCR segment */
   bounds: WindowBounds;
 }
 
 export interface ImageOcrRequest {
   /** Image to OCR (base64 PNG/JPEG) */
   image: string;
-  /** Optional request timeout in ms */
   timeoutMs?: number;
   /** Read text-sized rectangles instead of the whole image. */
   regions?: boolean;
@@ -466,15 +443,10 @@ export interface ImageOcrRequest {
 }
 
 export interface ImageOcrResponse {
-  /** Whether OCR succeeded */
   success: boolean;
-  /** Full OCR text dump */
   text?: string;
-  /** Structured OCR segments */
   items: OcrItem[];
-  /** Processing time in ms */
   processingTimeMs: number;
-  /** Error message if failed */
   error?: string;
 }
 

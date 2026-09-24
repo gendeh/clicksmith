@@ -327,8 +327,6 @@ export class WindowManager {
         for (const candidate of candidates) {
             try {
                 const escapedTarget = candidate.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-                // AppleScript fallback that finds a matching process by name
-                // (exact first, then contains) and then prefers AXMain/AXFocused window.
                 const script = `
         tell application "System Events"
           set targetName to "${escapedTarget}"
