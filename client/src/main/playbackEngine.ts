@@ -2153,7 +2153,7 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'feature',
                     findAll: true,
                     maxMatches: PlaybackEngine.SMART_CLICK_MAX_WINDOW_CANDIDATES,
-                    timeoutMs: contextBudget,
+                    timeoutMs: contextBudget + PlaybackEngine.SMART_CLICK_MATCH_RESPONSE_GRACE_MS,
                     minScale: scaleWindow.minScale,
                     maxScale: scaleWindow.maxScale,
                     scaleHint: this.smartClickScaleHint ?? 1.0,
