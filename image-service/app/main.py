@@ -18,6 +18,24 @@ def base64_to_cv2(b64_string):
     return cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
 
 
+def scale_template(template, scale_x, scale_y):
+    if template is None:
+        return template
+    if not np.isfinite(scale_x) or not np.isfinite(scale_y):
+        return template
+    if scale_x <= 0 or scale_y <= 0:
+        return template
+    if abs(scale_x - 1.0) < 0.02 and abs(scale_y - 1.0) < 0.02:
+        return template
+    height, width = template.shape[:2]
+    new_w = max(1, int(round(width * scale_x)))
+    new_h = max(1, int(round(height * scale_y)))
+    if new_w == width and new_h == height:
+        return template
+    interpolation = cv2.INTER_AREA if scale_x < 1 or scale_y < 1 else cv2.INTER_LINEAR
+    return cv2.resize(template, (new_w, new_h), interpolation=interpolation)
+
+
 def match_template(template, search_area, threshold, find_all, max_matches):
     result = cv2.matchTemplate(search_area, template, cv2.TM_CCOEFF_NORMED)
     min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(result)
@@ -97,6 +115,7 @@ def match_image():
 
         template = base64_to_cv2(template_b64)
         search_area = base64_to_cv2(search_area_b64)
+        template = scale_template(template, float(data.get("scaleX", 1)), float(data.get("scaleY", 1)))
 
         best_match = None
         matches = []

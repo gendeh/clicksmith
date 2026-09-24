@@ -38,3 +38,32 @@ def test_match_endpoint():
     data = res.get_json()
     assert data["success"] is True
     assert data["bestMatch"]["confidence"] >= 0.6
+
+
+def test_match_scales_template_to_current_window():
+    app = create_app()
+    client = app.test_client()
+
+    template = np.zeros((8, 8, 3), dtype=np.uint8)
+    template[:4, :] = 255
+
+    search = np.zeros((80, 80, 3), dtype=np.uint8)
+    search[40:48, 30:46] = 255
+
+    payload = {
+        "template": to_base64(template),
+        "searchArea": to_base64(search),
+        "threshold": 0.6,
+        "method": "template",
+        "findAll": False,
+        "maxMatches": 1,
+        "scaleX": 2,
+        "scaleY": 2,
+    }
+
+    res = client.post("/match", json=payload)
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    assert abs(data["bestMatch"]["x"] - 38) <= 2
+    assert abs(data["bestMatch"]["y"] - 48) <= 2

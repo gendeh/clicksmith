@@ -51,10 +51,12 @@ describe('SmartClick on gaming inputs', () => {
 
     const events = result.profile.events as RecordedEvent[];
     const anchored = events.filter(event => event.img_patch_b64).map(event => event.type);
-    expect(anchored).toEqual(['move', 'move', 'wheel', 'mouse']);
-    expect(events.filter(event => event.type === 'keyboard')[0].img_patch_b64).toBeUndefined();
+    expect(anchored).toEqual(['move', 'move', 'wheel', 'mouse', 'keyboard']);
     expect(events.find(event => event.type === 'mouse')?.btn).toBe('back');
-    expect(capturePatchMock).toHaveBeenCalledTimes(4);
+    expect(events.find(event => event.type === 'keyboard')?.metadata).toEqual(
+      expect.objectContaining({ anchor_window: { width: 1000, height: 800 } })
+    );
+    expect(capturePatchMock).toHaveBeenCalledTimes(5);
   });
 
   test('retargets a side click, a move, and a scroll, then keeps that offset', async () => {

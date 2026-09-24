@@ -369,6 +369,9 @@ export interface ImageMatchRequest {
   findAll: boolean;
   /** Maximum matches to return */
   maxMatches: number;
+  /** Scale the template to the current window. 1 means the recorded resolution. */
+  scaleX?: number;
+  scaleY?: number;
 }
 
 /**

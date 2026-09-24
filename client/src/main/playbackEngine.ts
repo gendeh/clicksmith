@@ -4,6 +4,7 @@ import { ImageService } from '../services/imageService';
 import { InputPlayer } from './inputPlayer';
 import { WindowManager } from './windowManager';
 import { captureRegion, captureScreen } from './screenCapture';
+import { consumedPresses, joinGamePresses, readAnchorWindow, windowScale } from './gameAim';
 
 type Clock = {
     now: () => number;
@@ -50,6 +51,7 @@ export class PlaybackEngine extends EventEmitter {
     private smartClickInFlight = new Set<number>();
     private smartClickPromises = new Map<number, Promise<{ coords: { x: number; y: number }; matched: boolean }>>();
     private anchorOffset = { x: 0, y: 0 };
+    private joinedPresses = new Map<RecordedEvent, RecordedEvent[]>();
     private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS = 200;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
@@ -105,6 +107,7 @@ export class PlaybackEngine extends EventEmitter {
         this.config = config;
         this.profile = profile;
         this.isPlaying = true;
+        this.joinedPresses = joinGamePresses(profile.events);
         this.actions = this.buildPlaybackActions(profile);
         this.currentActionIndex = 0;
         this.startedAt = this.clock.now();
@@ -183,7 +186,7 @@ export class PlaybackEngine extends EventEmitter {
         const action = this.actions[index];
         const speed = this.config.speedMultiplier ?? 1;
 
-        if (this.isPositional(action.type)) {
+        if (this.aimsAtScreen(action)) {
             const expected = this.resolveCoords(action.event);
             if (!this.isRapidSequence(index, speed)) {
                 this.prefetchSmartClick(index, action, expected);
@@ -250,7 +253,7 @@ export class PlaybackEngine extends EventEmitter {
                 this.startedAt += overdueMs;
             }
 
-            const coords = this.isPositional(action.type) ? await this.placePositional(index, action) : null;
+            const coords = this.aimsAtScreen(action) ? await this.placePositional(index, action) : null;
 
             // Capture actualAt AFTER the SmartClick await so the image match
             // wait time does not inflate the timing drift measurement.
@@ -332,17 +335,21 @@ export class PlaybackEngine extends EventEmitter {
             if (played === false) {
                 this.status = { ...this.status, lastError: 'pointer_button_unsupported' };
             }
+            this.fireJoinedPresses(action.event, true);
         } else if (action.type === 'mouseUp') {
             const button = action.event.btn ?? 'left';
             const played = this.inputPlayer.mouseUp(button);
             if (played === false) {
                 this.status = { ...this.status, lastError: 'pointer_button_unsupported' };
             }
+            this.fireJoinedPresses(action.event, false);
         } else if (action.type === 'keyDown') {
+            if (coords) this.inputPlayer.moveMouse(coords.x, coords.y);
             this.playKeyDown(action.event);
         } else if (action.type === 'keyUp') {
             this.playKeyUp(action.event);
         } else if (action.type === 'padDown' || action.type === 'padUp') {
+            if (action.type === 'padDown' && coords) this.inputPlayer.moveMouse(coords.x, coords.y);
             const played = this.inputPlayer.gamepadButton?.(
                 action.event.pad ?? 0,
                 action.event.control ?? 0,
@@ -380,6 +387,27 @@ export class PlaybackEngine extends EventEmitter {
         return type === 'mouseDown' || type === 'pointerMove' || type === 'wheel';
     }
 
+    private aimsAtScreen(action: PlaybackAction): boolean {
+        if (this.isPositional(action.type)) return true;
+        if (action.type !== 'keyDown' && action.type !== 'padDown') return false;
+        return Boolean(action.event.img_patch_b64);
+    }
+
+    private fireJoinedPresses(event: RecordedEvent, down: boolean) {
+        const presses = this.joinedPresses.get(event) ?? [];
+        for (const press of presses) {
+            if (press.type === 'keyboard') {
+                if (down) this.playKeyDown(press);
+                else this.playKeyUp(press);
+            } else if (press.type === 'gamepad') {
+                const played = this.inputPlayer.gamepadButton?.(press.pad ?? 0, press.control ?? 0, down);
+                if (played === false) {
+                    this.status = { ...this.status, lastError: 'gamepad_output_unavailable' };
+                }
+            }
+        }
+    }
+
     private applyAnchor(expected: { x: number; y: number }) {
         return {
             x: expected.x + this.anchorOffset.x,
@@ -403,7 +431,7 @@ export class PlaybackEngine extends EventEmitter {
 
     private prefetchSmartClick(index: number, action: PlaybackAction, expected: { x: number; y: number }) {
         const config = this.config;
-        if (!this.isPositional(action.type) || !config?.useImageMatching || !action.event.img_patch_b64) {
+        if (!this.aimsAtScreen(action) || !config?.useImageMatching || !action.event.img_patch_b64) {
             return;
         }
         if (this.smartClickInFlight.has(index) || this.smartClickResults.has(index)) return;
@@ -451,7 +479,13 @@ export class PlaybackEngine extends EventEmitter {
             return missed;
         }
 
-        const searchRadius = config.imageSearchRadius ?? 160;
+        const recordedWindow = readAnchorWindow(event);
+        const currentWindow = this.targetBounds;
+        const scale =
+            recordedWindow && currentWindow && currentWindow.width > 0 && currentWindow.height > 0
+                ? windowScale(recordedWindow, currentWindow)
+                : { sx: 1, sy: 1 };
+        const searchRadius = Math.max(8, Math.round((config.imageSearchRadius ?? 160) * Math.max(scale.sx, scale.sy)));
         const region = {
             x: Math.max(0, expected.x - searchRadius),
             y: Math.max(0, expected.y - searchRadius),
@@ -469,6 +503,8 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'hybrid',
                     findAll: false,
                     maxMatches: 1,
+                    scaleX: scale.sx,
+                    scaleY: scale.sy,
                 });
 
                 if (response.success && response.bestMatch && response.bestMatch.confidence >= config.imageMatchThreshold) {
@@ -516,6 +552,8 @@ export class PlaybackEngine extends EventEmitter {
                 method: 'hybrid',
                 findAll: false,
                 maxMatches: 1,
+                scaleX: scale.sx,
+                scaleY: scale.sy,
             });
             if (response.success && response.bestMatch && response.bestMatch.confidence >= config.imageMatchThreshold) {
                 this.status = {
@@ -572,9 +610,10 @@ export class PlaybackEngine extends EventEmitter {
         };
         const actions: PlaybackAction[] = [];
 
+        const consumed = consumedPresses(this.joinedPresses);
         profile.events.forEach((event, index) => {
             const metadata = event.metadata as Record<string, unknown> | undefined;
-            if (metadata?.takeover_marker) return;
+            if (metadata?.takeover_marker || consumed.has(event)) return;
             const jitter = adjustments?.[index] ?? 0;
 
             if (event.type === 'move') {

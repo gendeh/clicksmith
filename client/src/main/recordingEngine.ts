@@ -404,6 +404,7 @@ export class RecordingEngine extends EventEmitter {
 
         this.events.push(recordedEvent);
         this.emit('event', recordedEvent);
+        this.anchorEvent(recordedEvent, this.lastMousePosition.x, this.lastMousePosition.y, true);
         this.pendingKeyDown.set(event.keycode, {
             t_ms,
             hrTimeNs: hrNow,
@@ -560,6 +561,7 @@ export class RecordingEngine extends EventEmitter {
             };
             this.events.push(recordedEvent);
             this.emit('event', recordedEvent);
+            this.anchorEvent(recordedEvent, this.lastMousePosition.x, this.lastMousePosition.y, true);
             this.pendingPadDown.set(key, { t_ms, hrTimeNs: hrNow, event: recordedEvent });
             return;
         }
@@ -601,6 +603,13 @@ export class RecordingEngine extends EventEmitter {
             if (distance < VISUAL_ANCHOR_MIN_DISTANCE_PX) return;
         }
         this.lastAnchor = { x, y };
+        const bounds = this.targetBounds;
+        if (bounds && bounds.width > 0 && bounds.height > 0) {
+            event.metadata = {
+                ...(event.metadata ?? {}),
+                anchor_window: { width: bounds.width, height: bounds.height },
+            };
+        }
         void this.attachImageContext(event, x, y, this.config.imagePatchSize);
     }
 
