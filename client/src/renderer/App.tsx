@@ -867,25 +867,32 @@ const App: React.FC = () => {
               {playbackStatus?.lastError ? `, last: ${playbackStatus.lastError}` : ''}.
             </div>
 
-            <div className="adapter-card">
-              <div>
-                <div className="adapter-title">Geode Adapter</div>
-                <div className="profile-meta">
-                  {geodeAdapter ? `Connection: ${geodeAdapter.connection}` : 'No adapter configured.'}
+            {modAdapters.length === 0 && (
+              <div className="adapter-card">
+                <div className="profile-meta">No adapter configured.</div>
+              </div>
+            )}
+            {modAdapters.map(status => (
+              <div className="adapter-card" key={status.adapter.id} data-testid={`adapter-${status.adapter.id}`}>
+                <div>
+                  <div className="adapter-title">
+                    {status.adapter.id === 'geode-geometry-dash' ? 'Geode Adapter' : status.adapter.name}
+                  </div>
+                  <div className="profile-meta">Connection: {status.connection}</div>
+                  {status.lastError && <div className="profile-meta">Last error: {status.lastError}</div>}
                 </div>
-                {geodeAdapter?.lastError && <div className="profile-meta">Last error: {geodeAdapter.lastError}</div>}
-              </div>
-              <div className="adapter-actions">
-                <button className="btn btn-ghost" onClick={() => handleModProbe(geodeAdapter?.adapter.id ?? '')}>
-                  Check
-                </button>
-                {geodeAdapter?.adapter.launch && (
-                  <button className="btn btn-primary" onClick={() => handleModLaunch(geodeAdapter.adapter.id)}>
-                    Launch
+                <div className="adapter-actions">
+                  <button className="btn btn-ghost" onClick={() => handleModProbe(status.adapter.id)}>
+                    Check
                   </button>
-                )}
+                  {status.adapter.launch && (
+                    <button className="btn btn-primary" onClick={() => handleModLaunch(status.adapter.id)}>
+                      Launch
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            ))}
             {modMessage && <div className="profile-meta">{modMessage}</div>}
             <div className="adapter-links">
               {geodeAdapter?.adapter.install?.instructionsPath && (

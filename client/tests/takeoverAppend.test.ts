@@ -66,6 +66,42 @@ describe('takeover append', () => {
     ]);
     expect(reportTakeoverAppend(base.events.length, merged, 0).gapMs).toBe(0);
   });
+
+  test('writes the merged profile for the API lane when asked', () => {
+    const out = process.env.CLICKSMITH_API_FIXTURE;
+    const merged = mergeTakeoverEvents(base, 120, [
+      event({ t_ms: 0, type: 'mouse', btn: 'right' }),
+      event({ t_ms: 40, type: 'keyboard', key: 'e' }),
+    ]);
+    const report = reportTakeoverAppend(base.events.length, merged, 120);
+    if (out) {
+    fs.mkdirSync(path.dirname(out), { recursive: true });
+    fs.writeFileSync(
+      out,
+      JSON.stringify({
+        name: 'Minecraft wheel grab',
+        target_app: 'Minecraft',
+        created_at: '2026-01-01T00:00:00Z',
+        events: merged,
+        success_metric: { furthest_frame: 0, score: 0 },
+        version: 1,
+        notes: '',
+        metadata: {
+          created_at: '2026-01-01T00:00:00Z',
+          updated_at: '2026-01-01T00:00:00Z',
+          version: 1,
+          total_duration_ms: 184,
+          event_count: merged.length,
+          override_count: report.appended,
+          tags: ['takeover'],
+          custom: { game_id: 'minecraft', takeover_start_ms: 120 },
+        },
+      })
+    );
+    }
+    expect(report.gapMs).toBe(0);
+    expect(report.appended).toBe(2);
+  });
 });
 
 const runRepro = process.env.CLICKSMITH_REPRO === '1';

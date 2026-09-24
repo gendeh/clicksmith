@@ -42,6 +42,7 @@ Cloud-verifiable:
 
 - [Manager controls](./manager-controls.md) covers record, play, takeover, and target selection in the Profile Manager.
 - [Author a macro](./author-macro.md) covers picking a catalog game and appending your own clicks and keys with Takeover.
+- [Author a macro over HTTP](./author-macro-api.md) covers storing that appended profile through the backend.
 - [Profiles](./profiles.md) covers library selection, save-from-draft, and delete.
 - [Settings](./settings.md) covers SmartClick, Geode, and cloud-sync toggles.
 - [EULA gate](./eula-gate.md) covers first-run policy acceptance.

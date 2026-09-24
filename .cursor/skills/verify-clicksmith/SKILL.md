@@ -124,6 +124,7 @@ Removes the run directory and the processes this run started. Leaves `.cursor/sk
 | `... doctor` | Read-only health of the recorded instance |
 | `... drive manager-controls` | Record → save modal → persist profile |
 | `... drive author-macro` | Pick Minecraft → play → takeover append → save |
+| `... drive author-macro-api` | Loopback adapter takeover, then POST and GET the merged profile |
 | `... http METHOD URL [--body JSON]` | Raw HTTP |
 | `... screenshot --path FILE` | Full-page renderer screenshot |
 | `... cleanup` | Kill recorded PIDs only |

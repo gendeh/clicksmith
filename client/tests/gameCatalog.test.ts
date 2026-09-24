@@ -19,10 +19,10 @@ describe('game catalog', () => {
     ]);
   });
 
-  test('only Geometry Dash names a mod adapter', () => {
+  test('each shipped game names an adapter', () => {
     expect(catalog.games.find(game => game.id === 'geometry-dash')?.adapterId).toBe('geode-geometry-dash');
-    expect(catalog.games.find(game => game.id === 'genshin-impact')?.adapterId).toBeUndefined();
-    expect(catalog.games.find(game => game.id === 'minecraft')?.adapterId).toBeUndefined();
+    expect(catalog.games.find(game => game.id === 'genshin-impact')?.adapterId).toBe('genshin-impact-os');
+    expect(catalog.games.find(game => game.id === 'minecraft')?.adapterId).toBe('minecraft-os');
   });
 
   test('matches the longest window hint', () => {
@@ -34,8 +34,8 @@ describe('game catalog', () => {
 
   test('routes a mod only for a catalog game that names one', () => {
     expect(adapterIdForTarget(catalog, 'Geometry Dash', false)).toBe('geode-geometry-dash');
-    expect(adapterIdForTarget(catalog, 'Genshin Impact', true)).toBeNull();
-    expect(adapterIdForTarget(catalog, 'Minecraft', true)).toBeNull();
+    expect(adapterIdForTarget(catalog, 'Genshin Impact', false)).toBe('genshin-impact-os');
+    expect(adapterIdForTarget(catalog, 'Minecraft', false)).toBe('minecraft-os');
     expect(adapterIdForTarget(catalog, 'Notepad', true)).toBeNull();
     expect(adapterIdForTarget(catalog, 'screen', true)).toBe('geode-geometry-dash');
     expect(adapterIdForTarget(catalog, 'screen', false)).toBeNull();

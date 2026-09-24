@@ -13,16 +13,18 @@
     {
       "id": "genshin-impact",
       "name": "Genshin Impact",
-      "summary": "Author your own clicks and keys against the game window. Clicksmith does not inject into the game.",
+      "summary": "Author your own clicks and keys against the game window. The loopback adapter does not attach to the game.",
       "windowHints": ["genshin impact", "genshin"],
-      "inputs": ["mouse", "keyboard"]
+      "inputs": ["mouse", "keyboard"],
+      "adapterId": "genshin-impact-os"
     },
     {
       "id": "minecraft",
       "name": "Minecraft",
-      "summary": "Author your own clicks and keys against the Minecraft window. No client mod is required.",
+      "summary": "Author your own clicks and keys against the Minecraft window. The loopback adapter does not attach to the game.",
       "windowHints": ["minecraft"],
-      "inputs": ["mouse", "keyboard"]
+      "inputs": ["mouse", "keyboard"],
+      "adapterId": "minecraft-os"
     }
   ]
 }

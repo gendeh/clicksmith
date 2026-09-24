@@ -37,7 +37,7 @@ node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs drive autho
 
 ## Gotchas
 
-- Genshin Impact and Minecraft have no `adapterId`. Choosing them must not enable the Geode toggle or send input to `127.0.0.1:27737`.
+- Genshin Impact and Minecraft name loopback adapters in `mods/registry.json`. Those adapters do not attach to the game. Choosing them must not send input to the Geode port `127.0.0.1:27737`.
 - This lane does not inject OS clicks into a real game. A saved yours count is the UI contract for the append. Real hooks are `SKIP desktop`. A live Geode process is `SKIP game`.
 - Adding a title means editing `games/catalog.json` only. Do not add a class per game.
 - `node scripts/repro-takeover.mjs` replays the append on a timeline and writes `artifacts/repro-takeover/report.json`. `node scripts/repro-takeover.mjs --heap` also writes a heap snapshot next to that report. The report's `gapMs` is `0` when the human segment starts on the grab.

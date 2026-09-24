@@ -14,7 +14,7 @@
 5. Takeover keeps events before the grab and appends the clicks and keys you play next.
 
 ## Games
-`games/catalog.json` is the list of games. A window title matches `windowHints`. A game without `adapterId` uses the OS recorder only. Geometry Dash is the one catalog entry that names the Geode adapter. Adding a game is a new object in that file.
+`games/catalog.json` is the list of games. Each game names an `adapterId` in `mods/registry.json`. Geometry Dash names Geode. Genshin Impact and Minecraft name loopback stand-ins that do not attach to the game. If that port is down, recording uses OS input on the window. Adding a game is a catalog object plus a registry adapter.
 
 ## Security & Privacy
 Profiles and screenshots remain local unless the user opts in to cloud sync.

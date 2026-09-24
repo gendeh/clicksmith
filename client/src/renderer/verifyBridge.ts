@@ -1,4 +1,5 @@
 import catalogJson from '../../../games/catalog.json';
+import registryJson from '../../../mods/registry.json';
 import { parseGameCatalog } from '../domain/gameCatalog';
 import { mergeTakeoverEvents } from '../domain/takeoverAppend';
 import {
@@ -234,17 +235,10 @@ export function installVerifyBridge() {
           return preferences;
         }
         case IPC_CHANNELS.MODS_LIST:
-          return [
-            {
-              adapter: {
-                id: 'geode-geometry-dash',
-                name: 'Geode',
-                install: { instructionsPath: 'docs/mods/geode.md', downloadUrl: '' },
-                launch: true,
-              },
-              connection: 'disconnected',
-            },
-          ];
+          return registryJson.adapters.map(adapter => ({
+            adapter,
+            connection: 'disconnected',
+          }));
         case IPC_CHANNELS.RECORDING_START:
           emit(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
           return { success: true };
