@@ -18,6 +18,9 @@ import { ProfileStore } from './profileStore';
 import { SettingsStore } from './settingsStore';
 import { runAutoTune } from './autoTune';
 import { WindowManager } from './windowManager';
+import { hotkeyTarget } from './hotkeyTarget';
+import { ImageService } from '../services/imageService';
+import { playbackConfigFromPreferences, recordingConfigFromPreferences } from '../services/sessionConfig';
 import { syncProfileDeleteToCloud, syncProfileToCloud } from './cloudSync';
 import { ModManager } from './modManager';
 import { createDefaultInputHook, HookEvent, HookMouseEvent, InputHook } from './inputHooks';
@@ -33,8 +36,9 @@ const isDev = process.env.NODE_ENV === 'development';
 const settingsStore = new SettingsStore();
 const profileStore = new ProfileStore();
 const windowManager = new WindowManager();
-const recordingEngine = new RecordingEngine({ windowManager });
-const playbackEngine = new PlaybackEngine({ windowManager });
+const imageService = new ImageService();
+const recordingEngine = new RecordingEngine({ windowManager, imageService });
+const playbackEngine = new PlaybackEngine({ windowManager, imageService });
 const modManager = new ModManager();
 const MOD_ADAPTER_ID = 'geode-geometry-dash';
 const runLifecycle = new RunLifecycleManager();
@@ -44,6 +48,7 @@ let lastProfileId: string | null = null;
 let currentRecordingTarget: string | null = null;
 let lastPlaybackProfile: Profile | null = null;
 let lastPlaybackTarget: string | null = null;
+let selectedUiTarget = 'screen';
 let lastPlaybackLeadInMs = 0;
 let lastDraftProfile: Profile | null = null;
 let draftQuickReplayPending = false;
@@ -194,38 +199,11 @@ function createOverlayWindow() {
 }
 
 function buildRecordingConfig(config: Partial<RecordingConfig>): RecordingConfig {
-  const preferences = settingsStore.getPreferences();
-  return {
-    target: config.target ?? 'screen',
-    captureImages: config.captureImages ?? preferences.defaultRecordingConfig.captureImages ?? true,
-    imagePatchSize: config.imagePatchSize ?? preferences.defaultRecordingConfig.imagePatchSize ?? 128,
-    minEventInterval: config.minEventInterval ?? preferences.defaultRecordingConfig.minEventInterval ?? 8,
-    recordKeyboard: config.recordKeyboard ?? preferences.defaultRecordingConfig.recordKeyboard ?? true,
-    recordMouse: config.recordMouse ?? preferences.defaultRecordingConfig.recordMouse ?? true,
-    stopHotkey: config.stopHotkey ?? preferences.hotkeys.toggleRecording,
-    takeoverHotkey: config.takeoverHotkey ?? preferences.hotkeys.takeover,
-  };
+  return recordingConfigFromPreferences(config, settingsStore.getPreferences());
 }
 
 function buildPlaybackConfig(config: Partial<PlaybackConfig>): PlaybackConfig {
-  const preferences = settingsStore.getPreferences();
-  return {
-    profileId: config.profileId ?? '',
-    target: config.target ?? 'screen',
-    useImageMatching: config.useImageMatching ?? preferences.defaultPlaybackConfig.useImageMatching ?? true,
-    imageMatchThreshold:
-      config.imageMatchThreshold ?? preferences.defaultPlaybackConfig.imageMatchThreshold ?? 0.6,
-    timingTolerance: config.timingTolerance ?? preferences.defaultPlaybackConfig.timingTolerance ?? 20,
-    retryCount: config.retryCount ?? preferences.defaultPlaybackConfig.retryCount ?? 2,
-    retryDelay: config.retryDelay ?? preferences.defaultPlaybackConfig.retryDelay ?? 80,
-    takeoverHotkey: config.takeoverHotkey ?? preferences.hotkeys.takeover,
-    speedMultiplier: config.speedMultiplier ?? preferences.defaultPlaybackConfig.speedMultiplier ?? 1,
-    useRelativeCoords: config.useRelativeCoords ?? preferences.defaultPlaybackConfig.useRelativeCoords ?? true,
-    imageSearchRadius: config.imageSearchRadius ?? preferences.defaultPlaybackConfig.imageSearchRadius ?? 160,
-    snapToHz: config.snapToHz ?? preferences.defaultPlaybackConfig.snapToHz ?? 240,
-    snapMode: config.snapMode ?? preferences.defaultPlaybackConfig.snapMode ?? 'duration-lock',
-    snapPhaseMs: config.snapPhaseMs ?? preferences.defaultPlaybackConfig.snapPhaseMs ?? 0,
-  };
+  return playbackConfigFromPreferences(config, settingsStore.getPreferences());
 }
 
 function buildSuccessMetric(): SuccessMetric {
@@ -1229,7 +1207,7 @@ async function startLocalTakeover(triggerEvent?: HookMouseEvent): Promise<{ succ
     return { success: false, error: 'not_playing' };
   }
   pendingTakeoverProfile = lastPlaybackProfile;
-  pendingTakeoverStartMs = Math.max(0, playbackEngine.getElapsedMs() + lastPlaybackLeadInMs);
+  pendingTakeoverStartMs = Math.max(0, playbackEngine.getTakeoverAnchorMs() + lastPlaybackLeadInMs);
   const target = lastPlaybackTarget ?? lastPlaybackProfile.target_app ?? 'screen';
   currentRecordingTarget = target;
   disarmAutoTakeoverHook();
@@ -1444,6 +1422,8 @@ function setupIpcHandlers() {
     const normalized = buildRecordingConfig(config);
     clearPendingDraftState();
     currentRecordingTarget = normalized.target;
+    selectedUiTarget = hotkeyTarget(normalized.target);
+    lastPlaybackTarget = selectedUiTarget;
     const preferences = settingsStore.getPreferences();
     const adapterReachable = await isModAdapterReachable();
     const useModAdapterForThisRun =
@@ -1507,6 +1487,7 @@ function setupIpcHandlers() {
     lastProfileId = profile.id;
     lastPlaybackProfile = profile;
     lastPlaybackTarget = playbackConfig.target;
+    selectedUiTarget = hotkeyTarget(playbackConfig.target);
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
     lastPlaybackLeadInMs = 0;
@@ -1667,6 +1648,12 @@ function setupIpcHandlers() {
 
   registerValidatedHandle(IPC_CHANNELS.WINDOW_LIST, isNoPayload, async () => windowManager.listWindowsForPicker());
 
+  registerValidatedHandle(IPC_CHANNELS.WINDOW_FOCUS, isString, async target => {
+    selectedUiTarget = hotkeyTarget(target);
+    lastPlaybackTarget = selectedUiTarget;
+    return { success: true, target: selectedUiTarget };
+  });
+
   registerValidatedHandle(IPC_CHANNELS.SETTINGS_GET, isNoPayload, async () => ({
     preferences: settingsStore.getPreferences(),
     subscription: settingsStore.getSubscription(),
@@ -1791,17 +1778,19 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     }
 
     const adapterReachable = await isModAdapterReachable();
+    const recordTarget = hotkeyTarget(selectedUiTarget);
     const useModAdapterForThisRun = adapterReachable && preferences.useModAdapter;
     clearPendingDraftState();
     if (useModAdapterForThisRun) {
-      const result = await startModRecording('screen').catch(() => null);
+      const result = await startModRecording(recordTarget).catch(() => null);
       if (result?.success) return;
       broadcastStatus(IPC_CHANNELS.RECORDING_STATUS, { state: 'idle', error: result?.error ?? 'record_start_failed' });
       return;
     }
 
-    currentRecordingTarget = 'screen';
-    await recordingEngine.start(buildRecordingConfig({ target: 'screen' }));
+    currentRecordingTarget = recordTarget;
+    lastPlaybackTarget = recordTarget;
+    await recordingEngine.start(buildRecordingConfig({ target: recordTarget }));
     applyLifecycle('arm_record', 'local_record_start_hotkey');
     applyLifecycle('attempt_boundary', 'local_record_live_hotkey');
     mainWindow?.webContents.send(IPC_CHANNELS.RECORDING_STATUS, {
@@ -1836,6 +1825,7 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     if (draftProfile) {
       draftQuickReplayPending = false;
       lastPlaybackProfile = draftProfile;
+      const playTarget = hotkeyTarget(selectedUiTarget, draftProfile.target_app);
       lastPlaybackTarget = draftProfile.target_app;
       const useModAdapterForThisRun =
         adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(draftProfile.target_app));
@@ -1853,10 +1843,11 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
         );
         return;
       }
+      lastPlaybackTarget = playTarget;
       const runtime = buildRuntimePlaybackProfile(draftProfile);
       lastPlaybackLeadInMs = runtime.leadInMs;
       const result = await playbackEngine.start(
-        buildPlaybackConfig({ profileId: draftProfile.id, target: draftProfile.target_app }),
+        buildPlaybackConfig({ profileId: draftProfile.id, target: playTarget }),
         runtime.profile
       );
       if (result.success && shouldAutoTakeover()) {
@@ -1897,11 +1888,12 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       return;
     }
 
-    lastPlaybackTarget = 'screen';
+    const playTarget = hotkeyTarget(selectedUiTarget, profile.target_app);
+    lastPlaybackTarget = playTarget;
     const runtime = buildRuntimePlaybackProfile(profile);
     lastPlaybackLeadInMs = runtime.leadInMs;
     const result = await playbackEngine.start(
-      buildPlaybackConfig({ profileId, target: 'screen' }),
+      buildPlaybackConfig({ profileId, target: playTarget }),
       runtime.profile
     );
     if (result.success && shouldAutoTakeover()) {
@@ -1955,11 +1947,12 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       );
       return;
     }
-    lastPlaybackTarget = 'screen';
+    const playTarget = hotkeyTarget(selectedUiTarget, profile.target_app);
+    lastPlaybackTarget = playTarget;
     const runtime = buildRuntimePlaybackProfile(profile);
     lastPlaybackLeadInMs = runtime.leadInMs;
     const result = await playbackEngine.start(
-      buildPlaybackConfig({ profileId, target: 'screen' }),
+      buildPlaybackConfig({ profileId, target: playTarget }),
       runtime.profile
     );
     if (result.success && shouldAutoTakeover()) {

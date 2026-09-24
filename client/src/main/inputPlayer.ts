@@ -1,8 +1,14 @@
+import { runMacMouse } from './macMouse';
+
 type MouseButton = 'left' | 'right' | 'middle';
+
+export type MacMouseRunner = (args: string[]) => string;
 
 export class InputPlayer {
     private _robot: any = null;
     private _robotInstance: any;
+    private robotLoadFailed = false;
+    private macMouseRunner: MacMouseRunner;
     private keyAliases: Record<string, string> = {
         ctrl: 'control',
         control: 'control',
@@ -31,28 +37,52 @@ export class InputPlayer {
         capslock: 'capslock',
     };
 
-    constructor(robotInstance?: any) {
+    constructor(robotInstance?: any, macMouseRunner?: MacMouseRunner) {
         this._robotInstance = robotInstance ?? null;
+        this.macMouseRunner = macMouseRunner ?? runMacMouse;
     }
 
-    private get robot(): any {
+    private get robot(): any | null {
+        if (this.robotLoadFailed) return null;
         if (!this._robot) {
-            // eslint-disable-next-line @typescript-eslint/no-var-requires
-            this._robot = this._robotInstance || require('robotjs');
+            try {
+                // eslint-disable-next-line @typescript-eslint/no-var-requires
+                this._robot = this._robotInstance || require('robotjs');
+            } catch {
+                this.robotLoadFailed = true;
+                return null;
+            }
         }
         return this._robot;
     }
 
     public moveMouse(x: number, y: number) {
-        this.robot.moveMouse(Math.round(x), Math.round(y));
+        const pointX = Math.round(x);
+        const pointY = Math.round(y);
+        const robot = this.robot;
+        if (robot) {
+            robot.moveMouse(pointX, pointY);
+            return;
+        }
+        this.macMouseRunner(['move', String(pointX), String(pointY)]);
     }
 
     public mouseDown(button: MouseButton) {
-        this.robot.mouseToggle('down', button);
+        const robot = this.robot;
+        if (robot) {
+            robot.mouseToggle('down', button);
+            return;
+        }
+        this.macMouseRunner(['down', button]);
     }
 
     public mouseUp(button: MouseButton) {
-        this.robot.mouseToggle('up', button);
+        const robot = this.robot;
+        if (robot) {
+            robot.mouseToggle('up', button);
+            return;
+        }
+        this.macMouseRunner(['up', button]);
     }
 
     public async clickWithDuration(button: MouseButton, durationMs: number) {

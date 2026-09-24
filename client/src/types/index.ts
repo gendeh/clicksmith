@@ -48,6 +48,8 @@ export interface RecordedEvent {
   duration_ms: number;
   /** Base64 encoded image patch (128x128) around cursor */
   img_patch_b64?: string;
+  /** Base64 encoded larger context patch around cursor for zoom-robust matching */
+  img_context_b64?: string;
   /** SHA256 hash of image patch for quick comparison */
   img_hash?: string;
   /** Whether this event was a human override/takeover */
@@ -274,8 +276,30 @@ export interface PlaybackStatus {
   retries: number;
   /** Current timing drift in ms */
   timingDrift: number;
+  /** Aggregate replay reliability score (0-100) */
+  reliabilityScore?: number;
   /** Last error message */
   lastError?: string;
+  smartClickLastSource?: string;
+  smartClickLastMethod?: string;
+  smartClickLastConfidence?: number;
+  smartClickLastScale?: number;
+  smartClickRecordedScale?: number;
+  smartClickLastStableScale?: number;
+  smartClickScaleHint?: number;
+  smartClickAdaptationReason?: string;
+  smartClickLastDHashDistance?: number;
+  /** SmartClick debug: anchor offset currently applied to expected coordinates */
+  smartClickAnchorDx?: number;
+  /** SmartClick debug: anchor offset currently applied to expected coordinates */
+  smartClickAnchorDy?: number;
+  /** SmartClick debug: anchor trust score used to decide anchor fallback/bias */
+  smartClickAnchorTrust?: number;
+  /** SmartClick debug: effective minimum confidence for region matching */
+  smartClickRegionMinConfidence?: number;
+  /** SmartClick debug: effective minimum confidence for fullscreen matching */
+  smartClickFullscreenMinConfidence?: number;
+  smartClickAdaptationClicksLeft?: number;
 }
 
 // ============================================================================
@@ -342,8 +366,10 @@ export interface ScreenInfo {
 export interface ImageMatchRequest {
   /** Template image (base64) */
   template: string;
+  templateHash?: string;
   /** Search area image (base64) or full screen if omitted */
   searchArea?: string;
+  searchAreaHash?: string;
   /** Confidence threshold (0-1) */
   threshold: number;
   /** Match method */
@@ -352,6 +378,12 @@ export interface ImageMatchRequest {
   findAll: boolean;
   /** Maximum matches to return */
   maxMatches: number;
+  timeoutMs?: number;
+  minScale?: number;
+  maxScale?: number;
+  scaleHint?: number;
+  /** Maximum budget for matcher-side multi-scale work in ms */
+  maxBudgetMs?: number;
 }
 
 /**
@@ -364,6 +396,12 @@ export interface MatchResult {
   y: number;
   /** Match confidence (0-1) */
   confidence: number;
+  method?: 'template' | 'feature' | 'hybrid' | string;
+  score?: number;
+  /** Scale used for this candidate (1.0 = recorded scale) */
+  scale?: number;
+  inliers?: number;
+  homography_ok?: boolean;
   /** Match bounds */
   bounds: WindowBounds;
 }
@@ -381,6 +419,34 @@ export interface ImageMatchResponse {
   /** Processing time in ms */
   processingTimeMs: number;
   /** Error message if failed */
+  error?: string;
+}
+
+export interface OcrItem {
+  text: string;
+  /** OCR confidence (0-100) */
+  confidence: number;
+  bounds: WindowBounds;
+}
+
+export interface ImageOcrRequest {
+  /** Image to OCR (base64 PNG/JPEG) */
+  image: string;
+  timeoutMs?: number;
+  /** Read text-sized rectangles instead of the whole image. */
+  regions?: boolean;
+  /** Point, in image pixels, whose nearby words are read with the rectangles. */
+  focusX?: number;
+  focusY?: number;
+  /** Recorded words. A focused read that already contains one skips the rest of the page. */
+  query?: string;
+}
+
+export interface ImageOcrResponse {
+  success: boolean;
+  text?: string;
+  items: OcrItem[];
+  processingTimeMs: number;
   error?: string;
 }
 

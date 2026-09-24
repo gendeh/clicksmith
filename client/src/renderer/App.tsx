@@ -9,6 +9,8 @@ import {
   ModAdapterStatus,
   WindowInfo,
 } from '../types';
+import { formatSmartClickStatsLine } from '../services/smartClickStats';
+import { desktopAutomationPreferences } from '../services/desktopAutomation';
 
 type DraftProfile = {
   target_app: string;
@@ -125,6 +127,10 @@ const App: React.FC = () => {
       void ipc.invoke(IPC_CHANNELS.PLAYBACK_SELECT, { profileId: selectedProfileId });
     }
   }, [selectedProfileId]);
+
+  useEffect(() => {
+    void ipc.invoke(IPC_CHANNELS.WINDOW_FOCUS, activeTarget);
+  }, [activeTarget]);
 
   useEffect(() => {
     draftRef.current = draft;
@@ -339,6 +345,13 @@ const App: React.FC = () => {
           snapPhaseMs: clamped,
         },
       })
+      .then((updated: UserPreferences) => setPreferences(updated));
+  };
+
+  const applyDesktopAutomation = () => {
+    if (!preferences) return;
+    ipc
+      .invoke(IPC_CHANNELS.SETTINGS_SET, desktopAutomationPreferences(preferences))
       .then((updated: UserPreferences) => setPreferences(updated));
   };
 
@@ -805,10 +818,18 @@ const App: React.FC = () => {
               />
             </div>
 
-            <div className="profile-meta">
-              SmartClick stats: {playbackStatus?.successfulMatches ?? 0} matched, {playbackStatus?.failedMatches ?? 0}{' '}
-              fallback, {playbackStatus?.retries ?? 0} retries
-              {playbackStatus?.lastError ? `, last: ${playbackStatus.lastError}` : ''}.
+            <button
+              type="button"
+              className="btn btn-ghost"
+              data-testid="btn-desktop-automation"
+              onClick={applyDesktopAutomation}
+              disabled={!preferences}
+            >
+              Desktop Automation
+            </button>
+
+            <div className="profile-meta" data-testid="smartclick-stats">
+              {formatSmartClickStatsLine(playbackStatus)}
             </div>
 
             <div className="adapter-card">

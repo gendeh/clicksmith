@@ -1,5 +1,6 @@
 import { desktopCapturer, screen } from 'electron';
-import { execSync } from 'child_process';
+import { exec } from 'child_process';
+import { promisify } from 'util';
 import { WindowBounds, WindowInfo } from '../types';
 
 type NativeWindow = {
@@ -15,7 +16,12 @@ type NativeWindow = {
 };
 
 export class WindowManager {
+    private static readonly TARGET_BOUNDS_CACHE_TTL_MS = 1200;
     private nativeManager: any | null = null;
+    private nativeLoadAttempted = false;
+    private readonly execAsync = promisify(exec);
+    private readonly targetBoundsCache = new Map<string, { bounds: WindowBounds; ts: number }>();
+    private readonly targetBoundsInflight = new Map<string, Promise<WindowBounds | null>>();
     private readonly appLabelMap: Array<{ pattern: RegExp; label: string }> = [
         { pattern: /google chrome|chrome/i, label: 'Google Chrome' },
         { pattern: /brave/i, label: 'Brave' },
@@ -30,16 +36,21 @@ export class WindowManager {
         { pattern: /clicksmith/i, label: 'Clicksmith' },
     ];
 
-    constructor() {
+    constructor() {}
+
+    private ensureNativeManager() {
+        if (this.nativeManager || this.nativeLoadAttempted) return;
+        this.nativeLoadAttempted = true;
         try {
             // eslint-disable-next-line @typescript-eslint/no-var-requires
             this.nativeManager = require('node-window-manager');
-        } catch (error) {
+        } catch {
             this.nativeManager = null;
         }
     }
 
     public listWindows(): WindowInfo[] {
+        this.ensureNativeManager();
         if (this.nativeManager?.windowManager?.getWindows) {
             const windows = this.nativeManager.windowManager.getWindows() as NativeWindow[];
             return windows.map((win, index) => this.toWindowInfo(win, index));
@@ -166,34 +177,141 @@ export class WindowManager {
         return last.replace(/\.(app|exe)$/i, '').trim();
     }
 
+    private isDirectTargetMatch(win: WindowInfo, normalizedTarget: string): boolean {
+        const title = (win.title || '').toLowerCase();
+        const exe = (win.executablePath || '').toLowerCase();
+        const cls = (win.className || '').toLowerCase();
+        return (
+            title.includes(normalizedTarget) ||
+            exe.includes(normalizedTarget) ||
+            cls.includes(normalizedTarget)
+        );
+    }
+
+    private isAppLabelMatch(win: WindowInfo, normalizedTarget: string): boolean {
+        return this.mapWindowToAppLabel(win).toLowerCase() === normalizedTarget;
+    }
+
+    private pickBestWindowCandidate(candidates: WindowInfo[]): WindowInfo | null {
+        if (candidates.length === 0) return null;
+        const sorted = [...candidates].sort((a, b) => {
+            const scoreA =
+                (a.isFocused ? 8 : 0) +
+                (a.isVisible ? 4 : 0) +
+                (!a.isMinimized ? 2 : 0) +
+                Math.min(1, (a.bounds.width * a.bounds.height) / 1_000_000);
+            const scoreB =
+                (b.isFocused ? 8 : 0) +
+                (b.isVisible ? 4 : 0) +
+                (!b.isMinimized ? 2 : 0) +
+                Math.min(1, (b.bounds.width * b.bounds.height) / 1_000_000);
+            return scoreB - scoreA;
+        });
+        return sorted[0] ?? null;
+    }
+
+    private cacheTargetBounds(normalizedTarget: string, bounds: WindowBounds) {
+        this.targetBoundsCache.set(normalizedTarget, { bounds, ts: Date.now() });
+    }
+
+    private getCachedTargetBounds(normalizedTarget: string): WindowBounds | null {
+        const entry = this.targetBoundsCache.get(normalizedTarget);
+        if (!entry) return null;
+        if (Date.now() - entry.ts > WindowManager.TARGET_BOUNDS_CACHE_TTL_MS) {
+            return null;
+        }
+        return entry.bounds;
+    }
+
+    private getLastKnownTargetBounds(normalizedTarget: string): WindowBounds | null {
+        return this.targetBoundsCache.get(normalizedTarget)?.bounds ?? null;
+    }
+
+    private getImmediateTargetBoundsFromNative(normalizedTarget: string): WindowBounds | null {
+        const native = this.getNativeWindows();
+        if (!native.length) return null;
+
+        const active = this.getActiveWindow();
+        if (active) {
+            const activeDirect = this.isDirectTargetMatch(active, normalizedTarget);
+            const activeApp = this.isAppLabelMatch(active, normalizedTarget);
+            if (activeDirect || activeApp) return active.bounds;
+        }
+
+        const directCandidates = native.filter(win => this.isDirectTargetMatch(win, normalizedTarget));
+        const directBest = this.pickBestWindowCandidate(directCandidates);
+        if (directBest) return directBest.bounds;
+
+        const appCandidates = native.filter(win => this.isAppLabelMatch(win, normalizedTarget));
+        const appBest = this.pickBestWindowCandidate(appCandidates);
+        if (appBest) return appBest.bounds;
+
+        return null;
+    }
+
+    public async getTargetBoundsAsync(target: string): Promise<WindowBounds | null> {
+        const normalizedTarget = (target || '').trim().toLowerCase();
+        if (!normalizedTarget || normalizedTarget === 'screen') {
+            return this.getFallbackWindowInfo().bounds;
+        }
+
+        const immediate = this.getImmediateTargetBoundsFromNative(normalizedTarget);
+        if (immediate) {
+            this.cacheTargetBounds(normalizedTarget, immediate);
+            return immediate;
+        }
+
+        const inflight = this.targetBoundsInflight.get(normalizedTarget);
+        if (inflight) return inflight;
+
+        const request = (async () => {
+            try {
+                const macBounds = await this.getTargetBoundsViaMacOSAsync(normalizedTarget);
+                if (macBounds) {
+                    this.cacheTargetBounds(normalizedTarget, macBounds);
+                    return macBounds;
+                }
+                return null;
+            } finally {
+                this.targetBoundsInflight.delete(normalizedTarget);
+            }
+        })();
+
+        this.targetBoundsInflight.set(normalizedTarget, request);
+        return request;
+    }
+
+    public getKnownTargetBounds(target: string): WindowBounds | null {
+        const normalizedTarget = (target || '').trim().toLowerCase();
+        if (!normalizedTarget || normalizedTarget === 'screen') {
+            return this.getFallbackWindowInfo().bounds;
+        }
+        return (
+            this.getImmediateTargetBoundsFromNative(normalizedTarget) ??
+            this.getLastKnownTargetBounds(normalizedTarget)
+        );
+    }
+
     public getTargetBounds(target: string): WindowBounds {
         const normalizedTarget = (target || '').trim().toLowerCase();
         if (!normalizedTarget || normalizedTarget === 'screen') {
             return this.getFallbackWindowInfo().bounds;
         }
 
-        const native = this.getNativeWindows();
-        if (native.length > 0) {
-            const directMatch = native.find(win => {
-                const title = (win.title || '').toLowerCase();
-                const exe = (win.executablePath || '').toLowerCase();
-                const cls = (win.className || '').toLowerCase();
-                return title.includes(normalizedTarget) || exe.includes(normalizedTarget) || cls.includes(normalizedTarget);
-            });
-            if (directMatch) return directMatch.bounds;
-
-            const appMatch = native.find(win => this.mapWindowToAppLabel(win).toLowerCase() === normalizedTarget);
-            if (appMatch) return appMatch.bounds;
-
-            const active = this.getActiveWindow();
-            if (active && this.mapWindowToAppLabel(active).toLowerCase() === normalizedTarget) {
-                return active.bounds;
-            }
+        const immediate = this.getImmediateTargetBoundsFromNative(normalizedTarget);
+        if (immediate) {
+            this.cacheTargetBounds(normalizedTarget, immediate);
+            return immediate;
         }
 
-        // macOS AppleScript fallback when node-window-manager is not installed
-        const macBounds = this.getTargetBoundsViaMacOS(normalizedTarget);
-        if (macBounds) return macBounds;
+        const known =
+            this.getCachedTargetBounds(normalizedTarget) ?? this.getLastKnownTargetBounds(normalizedTarget);
+        if (known) {
+            void this.getTargetBoundsAsync(normalizedTarget).catch(() => null);
+            return known;
+        }
+
+        void this.getTargetBoundsAsync(normalizedTarget).catch(() => null);
 
         return this.getFallbackWindowInfo().bounds;
     }
@@ -203,47 +321,122 @@ export class WindowManager {
      * node-window-manager is not available. Returns null if the window
      * cannot be found or we are not on macOS.
      */
-    private getTargetBoundsViaMacOS(target: string): WindowBounds | null {
+    private async getTargetBoundsViaMacOSAsync(target: string): Promise<WindowBounds | null> {
         if (process.platform !== 'darwin') return null;
-        try {
-            // AppleScript that searches all running apps for a window whose
-            // process name or window title contains the target string.
-            const script = `
+        const candidates = this.getMacProcessNameCandidates(target);
+        for (const candidate of candidates) {
+            try {
+                const escapedTarget = candidate.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+                const script = `
         tell application "System Events"
-          set matchedBounds to ""
+          set targetName to "${escapedTarget}"
+          set matchedProc to missing value
           repeat with proc in (every application process whose visible is true)
-            set procName to name of proc
-            if procName contains "${target}" then
-              try
-                set win to first window of proc
-                set {x, y} to position of win
-                set {w, h} to size of win
-                return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
-              end try
-            end if
+            set procName to (name of proc) as text
+            ignoring case
+              if procName is equal to targetName then
+                set matchedProc to proc
+                exit repeat
+              end if
+            end ignoring
           end repeat
-          return ""
+
+          if matchedProc is missing value then
+          repeat with proc in (every application process whose visible is true)
+            set procName to (name of proc) as text
+            ignoring case
+              if procName contains targetName then
+                set matchedProc to proc
+                exit repeat
+              end if
+            end ignoring
+          end repeat
+          end if
+
+          if matchedProc is missing value then
+            return ""
+          end if
+
+          set win to missing value
+          try
+            set win to first window of matchedProc whose value of attribute "AXMain" is true
+          on error
+            try
+              set win to first window of matchedProc whose value of attribute "AXFocused" is true
+            on error
+              try
+                set win to window 1 of matchedProc
+              on error
+                return ""
+              end try
+            end try
+          end try
+
+          if win is missing value then
+            return ""
+          end if
+
+          set {x, y} to position of win
+          set {w, h} to size of win
+          return (x as text) & "," & (y as text) & "," & (w as text) & "," & (h as text)
         end tell
       `;
-            const result = execSync(`osascript -e '${script.replace(/'/g, "'\\''")}' 2>/dev/null`, {
-                timeout: 2000,
-                encoding: 'utf-8',
-            }).trim();
-            if (!result) return null;
-            const parts = result.split(',').map(Number);
-            if (parts.length !== 4 || parts.some(n => !Number.isFinite(n))) return null;
-            return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
-        } catch {
-            return null;
+                const { stdout } = await this.execAsync(`osascript -e '${script.replace(/'/g, "'\\''")}'`, {
+                    timeout: 1200,
+                });
+                const result = stdout.trim();
+                if (!result) continue;
+                const parts = result.split(',').map(Number);
+                if (parts.length !== 4 || parts.some(n => !Number.isFinite(n))) continue;
+                return { x: parts[0], y: parts[1], width: parts[2], height: parts[3] };
+            } catch {
+                continue;
+            }
         }
+        return null;
+    }
+
+    private getMacProcessNameCandidates(target: string): string[] {
+        const normalized = target.trim().toLowerCase();
+        const candidates = new Set<string>([normalized]);
+        if (normalized.includes('terminal') || normalized.includes('iterm')) {
+            candidates.add('iterm2');
+            candidates.add('iterm');
+            candidates.add('terminal');
+        }
+        if (normalized === 'code editor' || normalized.includes('vscode') || normalized.includes('visual studio code')) {
+            candidates.add('visual studio code');
+            candidates.add('code');
+        }
+        if (normalized === 'browser') {
+            candidates.add('google chrome');
+            candidates.add('safari');
+            candidates.add('firefox');
+            candidates.add('brave browser');
+            candidates.add('arc');
+        }
+        return Array.from(candidates);
     }
 
     public getActiveWindow(): WindowInfo | null {
+        this.ensureNativeManager();
         if (this.nativeManager?.windowManager?.getActiveWindow) {
             const active = this.nativeManager.windowManager.getActiveWindow() as NativeWindow | null;
             return active ? this.toWindowInfo(active, 0) : null;
         }
         return this.getFallbackWindowInfo();
+    }
+
+    public getPreferredTarget(): string {
+        const active = this.getActiveWindow();
+        if (!active) return 'screen';
+        const label = this.mapWindowToAppLabel(active).trim();
+        if (label && label.toLowerCase() !== 'screen') {
+            return label;
+        }
+        const title = (active.title || '').trim();
+        if (title) return title;
+        return 'screen';
     }
 
     private toWindowInfo(win: NativeWindow, index: number): WindowInfo {
@@ -262,12 +455,25 @@ export class WindowManager {
     }
 
     private getFallbackWindowInfo(): WindowInfo {
+        const displays = screen.getAllDisplays();
         const primary = screen.getPrimaryDisplay();
+        const minX = displays.length
+            ? Math.min(...displays.map(display => display.bounds.x))
+            : primary.bounds.x;
+        const minY = displays.length
+            ? Math.min(...displays.map(display => display.bounds.y))
+            : primary.bounds.y;
+        const maxX = displays.length
+            ? Math.max(...displays.map(display => display.bounds.x + display.bounds.width))
+            : primary.bounds.x + primary.bounds.width;
+        const maxY = displays.length
+            ? Math.max(...displays.map(display => display.bounds.y + display.bounds.height))
+            : primary.bounds.y + primary.bounds.height;
         const bounds = {
-            x: primary.bounds.x,
-            y: primary.bounds.y,
-            width: primary.bounds.width,
-            height: primary.bounds.height,
+            x: minX,
+            y: minY,
+            width: Math.max(1, maxX - minX),
+            height: Math.max(1, maxY - minY),
         };
         return {
             handle: 0,

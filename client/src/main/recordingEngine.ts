@@ -1,9 +1,11 @@
 import { EventEmitter } from 'events';
+import { screen } from 'electron';
 import { ModifierKey, MouseButton, RecordingConfig, RecordedEvent, WindowBounds } from '../types';
 import { capturePatch } from './screenCapture';
 import { computeDHash, computeSha256 } from './imageHash';
 import { createDefaultInputHook, HookEvent, InputHook, HookKeyEvent, HookMouseEvent } from './inputHooks';
 import { WindowManager } from './windowManager';
+import { ImageService } from '../services/imageService';
 
 const KEYCODE_MAP: Record<number, string> = {
     28: 'enter',
@@ -17,6 +19,8 @@ const KEYCODE_MAP: Record<number, string> = {
 };
 
 const HOOK_CALIBRATION_MIN_SAMPLES = 8;
+const IMAGE_CONTEXT_TIMEOUT_MS = 2_500;
+const RECORDING_BOUNDS_WAIT_MS = 200;
 
 class HookTimeCalibrator {
     private baseHookTime: number | null = null;
@@ -68,6 +72,8 @@ export class RecordingEngine extends EventEmitter {
     private inputHook: InputHook;
     private windowManager: WindowManager;
     private targetBounds: WindowBounds | null = null;
+    private boundsRefresh: Promise<void> | null = null;
+    private boundsRefreshAgain = false;
     private pendingMouseDown = new Map<MouseButton, PendingInput>();
     private pendingKeyDown = new Map<number, PendingInput>();
     private lastMousePosition = { x: 0, y: 0 };
@@ -76,11 +82,14 @@ export class RecordingEngine extends EventEmitter {
     private hookTimeOffsetMs = 0;
     private recordingStartHrNs: bigint = process.hrtime.bigint();
     private hookTimeCalibrator = new HookTimeCalibrator();
+    private imageService: ImageService | null = null;
+    private pendingImageContextTasks = new Set<Promise<void>>();
 
-    constructor(options?: { inputHook?: InputHook; windowManager?: WindowManager }) {
+    constructor(options?: { inputHook?: InputHook; windowManager?: WindowManager; imageService?: ImageService }) {
         super();
         this.inputHook = options?.inputHook ?? createDefaultInputHook();
         this.windowManager = options?.windowManager ?? new WindowManager();
+        this.imageService = options?.imageService ?? null;
     }
 
     public get recording(): boolean {
@@ -133,7 +142,10 @@ export class RecordingEngine extends EventEmitter {
         this.hookTimeOffsetMs = 0;
         this.recordingStartHrNs = process.hrtime.bigint();
         this.hookTimeCalibrator.reset();
-        this.targetBounds = this.windowManager.getTargetBounds(config.target);
+        this.targetBounds = await this.captureRecordingBounds(config.target);
+        if (!this.isRecording) {
+            return { success: false };
+        }
         this.attachListeners();
         this.inputHook.start();
         this.emit('status', { state: 'recording' });
@@ -152,6 +164,7 @@ export class RecordingEngine extends EventEmitter {
         this.applyHookTiming();
         this.inputHook.stop();
         this.inputHook.removeAllListeners();
+        await this.waitForImageContextTasks();
         this.emit('status', { state: 'idle' });
 
         return {
@@ -211,8 +224,9 @@ export class RecordingEngine extends EventEmitter {
         });
 
         if (this.config.captureImages) {
-            void this.attachImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
+            this.queueImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
         }
+        this.refreshRecordingBounds();
     }
 
     private attachListeners() {
@@ -220,6 +234,7 @@ export class RecordingEngine extends EventEmitter {
             const mouse = event as HookMouseEvent;
             this.lastMousePosition = { x: mouse.x, y: mouse.y };
             this.getEventTimeMs(mouse, process.hrtime.bigint());
+            this.refreshRecordingBounds();
         });
 
         this.inputHook.on('mousedown', (event: HookEvent) => this.handleMouseDown(event as HookMouseEvent));
@@ -265,8 +280,9 @@ export class RecordingEngine extends EventEmitter {
         });
 
         if (this.config.captureImages) {
-            void this.attachImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
+            this.queueImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
         }
+        this.refreshRecordingBounds();
     }
 
     private async handleMouseUp(event: HookMouseEvent) {
@@ -451,10 +467,66 @@ export class RecordingEngine extends EventEmitter {
         return mods;
     }
 
+    private async captureRecordingBounds(target: string): Promise<WindowBounds | null> {
+        const normalized = (target || '').trim().toLowerCase();
+        if (!normalized || normalized === 'screen') {
+            return this.windowManager.getTargetBounds(target);
+        }
+        const lookup = this.windowManager.getTargetBoundsAsync;
+        if (typeof lookup !== 'function') {
+            return this.windowManager.getTargetBounds(target);
+        }
+        let timer: NodeJS.Timeout | null = null;
+        try {
+            const pending = Promise.resolve(lookup.call(this.windowManager, target)).catch(() => null);
+            const bounds = await Promise.race([
+                pending,
+                new Promise<null>((resolve) => {
+                    timer = setTimeout(() => resolve(null), RECORDING_BOUNDS_WAIT_MS);
+                }),
+            ]);
+            if (!bounds) {
+                void pending.then((late) => {
+                    if (late && this.isRecording && !this.targetBounds) {
+                        this.targetBounds = late;
+                    }
+                });
+            }
+            return bounds ?? null;
+        } finally {
+            if (timer) clearTimeout(timer);
+        }
+    }
+
+    private refreshRecordingBounds() {
+        if (!this.isRecording || !this.config) return;
+        const target = this.config.target;
+        const normalized = (target || '').trim().toLowerCase();
+        if (!normalized || normalized === 'screen') return;
+        const lookup = this.windowManager.getTargetBoundsAsync;
+        if (typeof lookup !== 'function') return;
+        if (this.boundsRefresh) {
+            this.boundsRefreshAgain = true;
+            return;
+        }
+        this.boundsRefresh = Promise.resolve(lookup.call(this.windowManager, target))
+            .then((bounds) => {
+                if (bounds && this.isRecording) this.targetBounds = bounds;
+            })
+            .catch(() => undefined)
+            .finally(() => {
+                this.boundsRefresh = null;
+                if (this.boundsRefreshAgain && this.isRecording) {
+                    this.boundsRefreshAgain = false;
+                    this.refreshRecordingBounds();
+                }
+            });
+    }
+
     private getRelativeCoords(x: number, y: number) {
         const bounds = this.targetBounds;
         if (!bounds || bounds.width === 0 || bounds.height === 0) {
-            return { rel_x: 0, rel_y: 0 };
+            return { rel_x: Number.NaN, rel_y: Number.NaN };
         }
         return {
             rel_x: (x - bounds.x) / bounds.width,
@@ -462,15 +534,151 @@ export class RecordingEngine extends EventEmitter {
         };
     }
 
-    private async attachImageContext(event: RecordedEvent, x: number, y: number, size: number) {
+    private normalizeOcrText(value: string): string {
+        return value
+            .toLowerCase()
+            .replace(/[^a-z0-9\s]/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    private queueImageContext(event: RecordedEvent, x: number, y: number, size: number) {
+        const taskState = { active: true };
+        const task = this.withImageContextTimeout(
+            this.attachImageContext(event, x, y, size, () => !taskState.active),
+            IMAGE_CONTEXT_TIMEOUT_MS
+        )
+            .catch(error => {
+                this.mergeEventMetadata(event, {
+                    image_error: 'capture_failed',
+                    image_error_message: this.getErrorMessage(error),
+                });
+            })
+            .finally(() => {
+                taskState.active = false;
+                this.pendingImageContextTasks.delete(task);
+            });
+        this.pendingImageContextTasks.add(task);
+    }
+
+    private async withImageContextTimeout(task: Promise<void>, timeoutMs: number) {
+        let timeout: NodeJS.Timeout | null = null;
+        try {
+            await Promise.race([
+                task,
+                new Promise<void>((_, reject) => {
+                    timeout = setTimeout(() => reject(new Error('image_context_timeout')), timeoutMs);
+                }),
+            ]);
+        } finally {
+            if (timeout) clearTimeout(timeout);
+        }
+    }
+
+    private async waitForImageContextTasks() {
+        while (this.pendingImageContextTasks.size > 0) {
+            await Promise.allSettled(Array.from(this.pendingImageContextTasks));
+        }
+    }
+
+    private mergeEventMetadata(event: RecordedEvent, metadata: Record<string, unknown>) {
+        event.metadata = {
+            ...(event.metadata ?? {}),
+            ...metadata,
+        };
+    }
+
+    private getErrorMessage(error: unknown): string {
+        if (error instanceof Error && error.message) return error.message;
+        if (typeof error === 'string' && error.length > 0) return error;
+        return 'unknown_error';
+    }
+
+    private async attachImageContext(
+        event: RecordedEvent,
+        x: number,
+        y: number,
+        size: number,
+        isCancelled?: () => boolean
+    ) {
         try {
             const patch = await capturePatch(Math.round(x), Math.round(y), size);
-            event.img_patch_b64 = patch.toString('base64');
-            event.img_hash = computeSha256(patch);
+            const contextSize = Math.max(size, Math.min(384, size * 3));
+            const contextPatch = await capturePatch(Math.round(x), Math.round(y), contextSize);
+            const nearestDisplay = screen.getDisplayNearestPoint({ x: Math.round(x), y: Math.round(y) });
             const dhash = await computeDHash(patch);
-            event.metadata = { ...(event.metadata ?? {}), img_dhash: dhash };
+            let ocrMetadata: Record<string, unknown> = {};
+            if (this.imageService) {
+                try {
+                    const ocr = await this.imageService.ocrImage({
+                        image: contextPatch.toString('base64'),
+                        timeoutMs: 900,
+                    });
+                    const clickCenterX = contextSize / 2;
+                    const clickCenterY = contextSize / 2;
+                    let bestItem: NonNullable<typeof ocr.items>[number] | undefined;
+                    let bestScore = Number.NEGATIVE_INFINITY;
+                    for (const item of ocr.items ?? []) {
+                        if (this.normalizeOcrText(item.text).length < 2) continue;
+                        const bounds = item.bounds;
+                        const centerX = bounds.x + bounds.width / 2;
+                        const centerY = bounds.y + bounds.height / 2;
+                        const containsClick =
+                            clickCenterX >= bounds.x &&
+                            clickCenterX <= bounds.x + bounds.width &&
+                            clickCenterY >= bounds.y &&
+                            clickCenterY <= bounds.y + bounds.height;
+                        const distance = Math.hypot(centerX - clickCenterX, centerY - clickCenterY);
+                        const score =
+                            (containsClick ? 2000 : 0) +
+                            Math.max(0, 300 - distance) +
+                            Math.max(0, item.confidence);
+                        if (score > bestScore) {
+                            bestScore = score;
+                            bestItem = item;
+                        }
+                    }
+
+                    if (bestItem) {
+                        const centerX = bestItem.bounds.x + bestItem.bounds.width / 2;
+                        const centerY = bestItem.bounds.y + bestItem.bounds.height / 2;
+                        ocrMetadata = {
+                            ocr_primary_text: bestItem.text,
+                            ocr_primary_text_normalized: this.normalizeOcrText(bestItem.text),
+                            ocr_context_text: ocr.text ?? '',
+                            ocr_anchor_norm_x:
+                                bestItem.bounds.width > 0 ? (clickCenterX - centerX) / bestItem.bounds.width : 0,
+                            ocr_anchor_norm_y:
+                                bestItem.bounds.height > 0 ? (clickCenterY - centerY) / bestItem.bounds.height : 0,
+                        };
+                    }
+                } catch (error) {
+                    ocrMetadata = {
+                        image_ocr_error: 'ocr_failed',
+                        image_ocr_error_message: this.getErrorMessage(error),
+                    };
+                }
+            }
+            if (isCancelled?.()) return;
+            event.img_patch_b64 = patch.toString('base64');
+            event.img_context_b64 = contextPatch.toString('base64');
+            event.img_hash = computeSha256(patch);
+            this.mergeEventMetadata(event, {
+                img_dhash: dhash,
+                recorded_match_scale: 1.0,
+                capture_scale: nearestDisplay.scaleFactor ?? 1,
+                capture_display_id: nearestDisplay.id,
+                patch_physical_w: size,
+                patch_physical_h: size,
+                context_physical_w: contextSize,
+                context_physical_h: contextSize,
+                ...ocrMetadata,
+            });
         } catch (error) {
-            event.metadata = { ...(event.metadata ?? {}), image_error: 'capture_failed' };
+            this.mergeEventMetadata(event, {
+                image_error: 'capture_failed',
+                image_error_message: this.getErrorMessage(error),
+            });
         }
     }
 

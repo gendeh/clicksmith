@@ -9,6 +9,7 @@ module.exports = {
       workAreaSize: { width: 1920, height: 1080 },
     }),
     getAllDisplays: () => [],
+    getDisplayNearestPoint: () => ({ id: 1, scaleFactor: 1 }),
   },
   app: {
     getPath: (name) => `/tmp/clicksmith-test/${name}`,
