@@ -1,6 +1,6 @@
 # Local record and playback
 
-OS-level recording and playback inject real mouse and keyboard events through `uiohook-napi` and `robotjs` inside Electron main.
+OS-level recording and playback inject pointer buttons, pointer motion, scroll, and keyboard events through `uiohook-napi` and `robotjs` inside Electron main. Gamepad buttons and sticks are recorded from Linux joystick devices when those devices are readable. The save dialog's kind summary is the `input-kinds` feature.
 
 ## Sub-features
 

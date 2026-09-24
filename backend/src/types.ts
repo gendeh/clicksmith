@@ -1,6 +1,6 @@
 export interface RecordedEvent {
   t_ms: number;
-  type: 'mouse' | 'keyboard';
+  type: 'mouse' | 'keyboard' | 'move' | 'wheel' | 'gamepad';
   btn?: string;
   key?: string;
   keyCode?: number;
@@ -9,6 +9,11 @@ export interface RecordedEvent {
   rel_x: number;
   rel_y: number;
   duration_ms: number;
+  wheel_dx?: number;
+  wheel_dy?: number;
+  pad?: number;
+  control?: number;
+  value?: number;
   img_patch_b64?: string;
   img_hash?: string;
   human_override: boolean;

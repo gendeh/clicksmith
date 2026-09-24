@@ -20,6 +20,7 @@ import { runAutoTune } from './autoTune';
 import { WindowManager } from './windowManager';
 import { syncProfileDeleteToCloud, syncProfileToCloud } from './cloudSync';
 import { ModManager } from './modManager';
+import { LinuxJoystickSource } from './gamepadSource';
 import { createDefaultInputHook, HookEvent, HookMouseEvent, InputHook } from './inputHooks';
 import { RunLifecycleEventType, RunLifecycleManager } from './runLifecycle';
 import { RunTraceLogger } from './runTrace';
@@ -33,7 +34,7 @@ const isDev = process.env.NODE_ENV === 'development';
 const settingsStore = new SettingsStore();
 const profileStore = new ProfileStore();
 const windowManager = new WindowManager();
-const recordingEngine = new RecordingEngine({ windowManager });
+const recordingEngine = new RecordingEngine({ windowManager, gamepadSource: new LinuxJoystickSource() });
 const playbackEngine = new PlaybackEngine({ windowManager });
 const modManager = new ModManager();
 const MOD_ADAPTER_ID = 'geode-geometry-dash';
@@ -68,6 +69,8 @@ let modStatusPollMisses = 0;
 let autoTakeoverHookActive = false;
 let autoTakeoverHookTriggered = false;
 let autoTakeoverSuppressUntilMs = 0;
+let autoTakeoverPad: LinuxJoystickSource | null = null;
+let autoTakeoverPadTimer: NodeJS.Timeout | null = null;
 let lastModReplayPaused = false;
 let lastRecordingEngineState: string = 'idle';
 let lastPlaybackEngineState: string = 'idle';
@@ -202,6 +205,9 @@ function buildRecordingConfig(config: Partial<RecordingConfig>): RecordingConfig
     minEventInterval: config.minEventInterval ?? preferences.defaultRecordingConfig.minEventInterval ?? 8,
     recordKeyboard: config.recordKeyboard ?? preferences.defaultRecordingConfig.recordKeyboard ?? true,
     recordMouse: config.recordMouse ?? preferences.defaultRecordingConfig.recordMouse ?? true,
+    recordWheel: config.recordWheel ?? preferences.defaultRecordingConfig.recordWheel ?? true,
+    recordMotion: config.recordMotion ?? preferences.defaultRecordingConfig.recordMotion ?? true,
+    recordGamepad: config.recordGamepad ?? preferences.defaultRecordingConfig.recordGamepad ?? true,
     stopHotkey: config.stopHotkey ?? preferences.hotkeys.toggleRecording,
     takeoverHotkey: config.takeoverHotkey ?? preferences.hotkeys.takeover,
   };
@@ -946,6 +952,12 @@ function disarmAutoTakeoverHook() {
   autoTakeoverSuppressUntilMs = 0;
   autoTakeoverHook.stop();
   autoTakeoverHook.removeAllListeners();
+  if (autoTakeoverPadTimer) {
+    clearInterval(autoTakeoverPadTimer);
+    autoTakeoverPadTimer = null;
+  }
+  autoTakeoverPad?.stop();
+  autoTakeoverPad = null;
 }
 
 function armAutoTakeoverHook() {
@@ -953,19 +965,35 @@ function armAutoTakeoverHook() {
   autoTakeoverHookActive = true;
   autoTakeoverHookTriggered = false;
   autoTakeoverHook.removeAllListeners();
-  autoTakeoverHook.on('mousedown', (event: HookEvent) => {
+  const beginTakeover = (trigger?: HookMouseEvent) => {
     if (autoTakeoverHookTriggered) return;
     if (Date.now() <= autoTakeoverSuppressUntilMs) return;
+    if (!playbackEngine.playing) return;
+    autoTakeoverHookTriggered = true;
+    void startLocalTakeover(trigger);
+  };
+  autoTakeoverHook.on('mousedown', (event: HookEvent) => {
     const mouseEvent = event as HookMouseEvent;
     const button = mouseEvent.button ?? 1;
-    if (button !== 1) return;
-
-    if (!playbackEngine.playing) return;
+    if (button < 1 || button > 5) return;
     if (typeof mouseEvent.x !== 'number' || typeof mouseEvent.y !== 'number') return;
-    autoTakeoverHookTriggered = true;
-    void startLocalTakeover(mouseEvent);
+    beginTakeover(mouseEvent);
+  });
+  autoTakeoverHook.on('keydown', () => {
+    beginTakeover();
+  });
+  autoTakeoverHook.on('wheel', () => {
+    beginTakeover();
   });
   autoTakeoverHook.start();
+  autoTakeoverPad = new LinuxJoystickSource();
+  autoTakeoverPad.start();
+  autoTakeoverPadTimer = setInterval(() => {
+    const samples = autoTakeoverPad?.poll() ?? [];
+    if (samples.some(sample => sample.kind === 'button' && sample.value >= 0.5)) {
+      beginTakeover();
+    }
+  }, 16);
 }
 
 async function startModRecording(target: string): Promise<{ success: boolean; error?: string }> {
@@ -1339,6 +1367,9 @@ function isRecordingConfigPayload(value: unknown): value is Partial<RecordingCon
   if (value.minEventInterval !== undefined && typeof value.minEventInterval !== 'number') return false;
   if (value.recordKeyboard !== undefined && typeof value.recordKeyboard !== 'boolean') return false;
   if (value.recordMouse !== undefined && typeof value.recordMouse !== 'boolean') return false;
+  if (value.recordWheel !== undefined && typeof value.recordWheel !== 'boolean') return false;
+  if (value.recordMotion !== undefined && typeof value.recordMotion !== 'boolean') return false;
+  if (value.recordGamepad !== undefined && typeof value.recordGamepad !== 'boolean') return false;
   if (value.stopHotkey !== undefined && typeof value.stopHotkey !== 'string') return false;
   if (value.takeoverHotkey !== undefined && typeof value.takeoverHotkey !== 'string') return false;
   return true;

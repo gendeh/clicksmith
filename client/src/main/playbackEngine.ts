@@ -11,7 +11,16 @@ type Clock = {
     clearTimeout: (handle: NodeJS.Timeout) => void;
 };
 
-type PlaybackActionType = 'mouseDown' | 'mouseUp' | 'keyDown' | 'keyUp';
+type PlaybackActionType =
+    | 'pointerMove'
+    | 'wheel'
+    | 'mouseDown'
+    | 'mouseUp'
+    | 'keyDown'
+    | 'keyUp'
+    | 'padDown'
+    | 'padUp'
+    | 'padAxis';
 
 type PlaybackAction = {
     t_ms: number;
@@ -44,10 +53,15 @@ export class PlaybackEngine extends EventEmitter {
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
     private readonly overduePolicyByAction: Record<PlaybackActionType, OverduePolicy> = {
+        pointerMove: 'late-dispatch',
+        wheel: 'late-dispatch',
         mouseDown: 'late-dispatch',
         mouseUp: 'late-dispatch',
         keyDown: 'late-dispatch',
         keyUp: 'late-dispatch',
+        padDown: 'late-dispatch',
+        padUp: 'late-dispatch',
+        padAxis: 'late-dispatch',
     };
 
     constructor(options?: {
@@ -237,7 +251,9 @@ export class PlaybackEngine extends EventEmitter {
             const coords =
                 action.type === 'mouseDown'
                     ? await this.getSmartClickCoords(index, this.resolveCoords(action.event))
-                    : null;
+                    : action.type === 'pointerMove' || action.type === 'wheel'
+                      ? this.resolveCoords(action.event)
+                      : null;
 
             // Capture actualAt AFTER the SmartClick await so the image match
             // wait time does not inflate the timing drift measurement.
@@ -302,19 +318,51 @@ export class PlaybackEngine extends EventEmitter {
             actualAtMs,
         });
 
-        if (action.type === 'mouseDown') {
+        if (action.type === 'pointerMove') {
+            if (coords) this.inputPlayer.moveMouse(coords.x, coords.y);
+        } else if (action.type === 'wheel') {
+            if (coords) this.inputPlayer.moveMouse(coords.x, coords.y);
+            const played = this.inputPlayer.scroll?.(action.event.wheel_dx ?? 0, action.event.wheel_dy ?? 0);
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'scroll_output_unavailable' };
+            }
+        } else if (action.type === 'mouseDown') {
             const button = action.event.btn ?? 'left';
             if (coords) {
                 this.inputPlayer.moveMouse(coords.x, coords.y);
             }
-            this.inputPlayer.mouseDown(button);
+            const played = this.inputPlayer.mouseDown(button);
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'pointer_button_unsupported' };
+            }
         } else if (action.type === 'mouseUp') {
             const button = action.event.btn ?? 'left';
-            this.inputPlayer.mouseUp(button);
+            const played = this.inputPlayer.mouseUp(button);
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'pointer_button_unsupported' };
+            }
         } else if (action.type === 'keyDown') {
             this.playKeyDown(action.event);
         } else if (action.type === 'keyUp') {
             this.playKeyUp(action.event);
+        } else if (action.type === 'padDown' || action.type === 'padUp') {
+            const played = this.inputPlayer.gamepadButton?.(
+                action.event.pad ?? 0,
+                action.event.control ?? 0,
+                action.type === 'padDown'
+            );
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'gamepad_output_unavailable' };
+            }
+        } else if (action.type === 'padAxis') {
+            const played = this.inputPlayer.gamepadAxis?.(
+                action.event.pad ?? 0,
+                action.event.control ?? 0,
+                action.event.value ?? 0
+            );
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'gamepad_output_unavailable' };
+            }
         }
 
         this.status = this.updateStatus(this.status, action, eventIndex, scheduledAtMs, actualAtMs);
@@ -500,7 +548,28 @@ export class PlaybackEngine extends EventEmitter {
             if (metadata?.takeover_marker) return;
             const jitter = adjustments?.[index] ?? 0;
 
-            if (event.type === 'mouse') {
+            if (event.type === 'move') {
+                actions.push({ t_ms: snapTime(Math.max(0, event.t_ms + jitter)), type: 'pointerMove', event });
+            } else if (event.type === 'wheel') {
+                actions.push({ t_ms: snapTime(Math.max(0, event.t_ms + jitter)), type: 'wheel', event });
+            } else if (event.type === 'gamepad') {
+                const axis = metadata?.axis === true || metadata?.action === 'axis';
+                if (axis) {
+                    actions.push({ t_ms: snapTime(Math.max(0, event.t_ms + jitter)), type: 'padAxis', event });
+                } else {
+                    const { pressTime, releaseTime } = this.getPressReleaseTimes(event);
+                    if (releaseTime !== null) {
+                        const rawPress = Math.max(0, pressTime + jitter);
+                        const rawRelease = Math.max(rawPress, releaseTime + jitter);
+                        actions.push({ t_ms: snapTime(rawPress), type: 'padDown', event });
+                        actions.push({ t_ms: snapTime(Math.max(snapTime(rawPress), rawRelease)), type: 'padUp', event });
+                    } else {
+                        const time = snapTime(Math.max(0, event.t_ms + jitter));
+                        actions.push({ t_ms: time, type: 'padDown', event });
+                        actions.push({ t_ms: time, type: 'padUp', event });
+                    }
+                }
+            } else if (event.type === 'mouse') {
                 const { pressTime, releaseTime } = this.getPressReleaseTimes(event);
                 if (releaseTime !== null) {
                     const rawPress = Math.max(0, pressTime + jitter);
@@ -608,16 +677,26 @@ export class PlaybackEngine extends EventEmitter {
 
     private actionOrder(type: PlaybackActionType): number {
         switch (type) {
-            case 'mouseDown':
+            case 'pointerMove':
                 return 0;
-            case 'keyDown':
+            case 'wheel':
                 return 1;
-            case 'mouseUp':
+            case 'padAxis':
                 return 2;
-            case 'keyUp':
+            case 'mouseDown':
                 return 3;
-            default:
+            case 'keyDown':
                 return 4;
+            case 'padDown':
+                return 5;
+            case 'mouseUp':
+                return 6;
+            case 'keyUp':
+                return 7;
+            case 'padUp':
+                return 8;
+            default:
+                return 9;
         }
     }
 

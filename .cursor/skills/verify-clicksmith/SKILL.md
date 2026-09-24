@@ -122,6 +122,7 @@ Removes the run directory and the processes this run started. Leaves `.cursor/sk
 | `... launch --lane ui` | Verify renderer only |
 | `... doctor` | Read-only health of the recorded instance |
 | `... drive manager-controls` | Record → save modal → persist profile |
+| `... drive input-kinds` | Record → save modal lists pointer, key, move, scroll, and gamepad |
 | `... http METHOD URL [--body JSON]` | Raw HTTP |
 | `... screenshot --path FILE` | Full-page renderer screenshot |
 | `... cleanup` | Kill recorded PIDs only |

@@ -9,6 +9,7 @@ import {
   ModAdapterStatus,
   WindowInfo,
 } from '../types';
+import { summarizeRecordedInputs } from '../types/input';
 
 type DraftProfile = {
   target_app: string;
@@ -479,6 +480,7 @@ const App: React.FC = () => {
               {draft.events.length} events captured against <strong>{draft.target_app}</strong>. Choose whether
               to keep the new sequence or discard it.
             </p>
+            <p data-testid="save-run-kinds">{summarizeRecordedInputs(draft.events)}</p>
             <div style={{ display: 'grid', gap: '10px' }}>
               <input
                 className="input"

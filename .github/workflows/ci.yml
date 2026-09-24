@@ -66,7 +66,9 @@ jobs:
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs launch --lane all
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs doctor
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs drive manager-controls
+          node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs drive input-kinds
           test -f .cursor/skills/verify-clicksmith/artifacts/manager-controls/proof.json
+          test -f .cursor/skills/verify-clicksmith/artifacts/input-kinds/proof.json
           node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs cleanup
       - name: Upload verify evidence
         if: always()
@@ -75,6 +77,7 @@ jobs:
           name: verify-clicksmith-manager-controls
           path: |
             .cursor/skills/verify-clicksmith/artifacts/manager-controls/
+            .cursor/skills/verify-clicksmith/artifacts/input-kinds/
             /tmp/clicksmith-verify/ci/*.log
           if-no-files-found: warn
 
