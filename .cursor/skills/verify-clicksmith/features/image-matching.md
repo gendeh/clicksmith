@@ -10,7 +10,7 @@ SmartClick sends a template patch and a search image to the Flask image-service.
 
 ## How to get to it (user POV)
 
-- Enable `SmartClick matching` in Settings, then Play a profile that has `img_patch_b64` on events.
+- Enable `SmartClick matching` in Settings, then Play a profile that has `img_patch_b64` on a pointer click, a pointer move, or a scroll.
 - Direct HTTP `/match` is the observable contract agents can prove without capturing the screen.
 
 ## Driving it with control-clicksmith
@@ -31,4 +31,6 @@ A fixture generator lives in `image-service/tests/test_match.py`. Reuse that ima
 
 - `opencv-python-headless` is required. A GUI OpenCV wheel is the wrong package for Cloud Agents.
 - Hybrid/feature matching can return a different point than template matching. Assert `success` and confidence, not exact pixels, unless the test built the pixels.
-- Client playback talking to a down image-service falls back to positional clicks. That fallback is not a match proof.
+- Client playback talking to a down image-service falls back to the recorded point, then keeps that correction for later pointer moves that have no new patch. That fallback is not a match proof.
+- Keyboard and gamepad samples are not visual targets. SmartClick does not move them.
+- A drag records a patch about every 48px, not on every motion sample. Playback applies the last match offset to the samples in between.

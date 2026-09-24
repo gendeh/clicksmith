@@ -46,9 +46,10 @@ export class PlaybackEngine extends EventEmitter {
     private pauseStartedAt: number | null = null;
     private pausedDurationMs = 0;
     private readonly schedulerLookaheadMs = 2;
-    private smartClickResults = new Map<number, { coords: { x: number; y: number }; ready: boolean }>();
+    private smartClickResults = new Map<number, { coords: { x: number; y: number }; ready: boolean; matched: boolean }>();
     private smartClickInFlight = new Set<number>();
-    private smartClickPromises = new Map<number, Promise<{ x: number; y: number }>>();
+    private smartClickPromises = new Map<number, Promise<{ coords: { x: number; y: number }; matched: boolean }>>();
+    private anchorOffset = { x: 0, y: 0 };
     private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS = 200;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
@@ -111,6 +112,7 @@ export class PlaybackEngine extends EventEmitter {
         this.pausedDurationMs = 0;
         this.smartClickResults.clear();
         this.smartClickInFlight.clear();
+        this.anchorOffset = { x: 0, y: 0 };
         this.dispatchDeltaSamples = [];
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
         this.status = this.createStatus('playing');
@@ -181,7 +183,7 @@ export class PlaybackEngine extends EventEmitter {
         const action = this.actions[index];
         const speed = this.config.speedMultiplier ?? 1;
 
-        if (action.type === 'mouseDown') {
+        if (this.isPositional(action.type)) {
             const expected = this.resolveCoords(action.event);
             if (!this.isRapidSequence(index, speed)) {
                 this.prefetchSmartClick(index, action, expected);
@@ -248,12 +250,7 @@ export class PlaybackEngine extends EventEmitter {
                 this.startedAt += overdueMs;
             }
 
-            const coords =
-                action.type === 'mouseDown'
-                    ? await this.getSmartClickCoords(index, this.resolveCoords(action.event))
-                    : action.type === 'pointerMove' || action.type === 'wheel'
-                      ? this.resolveCoords(action.event)
-                      : null;
+            const coords = this.isPositional(action.type) ? await this.placePositional(index, action) : null;
 
             // Capture actualAt AFTER the SmartClick await so the image match
             // wait time does not inflate the timing drift measurement.
@@ -379,17 +376,42 @@ export class PlaybackEngine extends EventEmitter {
         };
     }
 
+    private isPositional(type: PlaybackActionType): boolean {
+        return type === 'mouseDown' || type === 'pointerMove' || type === 'wheel';
+    }
+
+    private applyAnchor(expected: { x: number; y: number }) {
+        return {
+            x: expected.x + this.anchorOffset.x,
+            y: expected.y + this.anchorOffset.y,
+        };
+    }
+
+    private async placePositional(index: number, action: PlaybackAction) {
+        const expected = this.resolveCoords(action.event);
+        if (!this.config?.useImageMatching || !action.event.img_patch_b64) {
+            return this.applyAnchor(expected);
+        }
+        const placed = await this.getSmartClickCoords(index, expected);
+        if (!placed.matched) return this.applyAnchor(expected);
+        this.anchorOffset = {
+            x: placed.coords.x - expected.x,
+            y: placed.coords.y - expected.y,
+        };
+        return placed.coords;
+    }
+
     private prefetchSmartClick(index: number, action: PlaybackAction, expected: { x: number; y: number }) {
         const config = this.config;
-        if (action.type !== 'mouseDown' || !config?.useImageMatching || !action.event.img_patch_b64) {
+        if (!this.isPositional(action.type) || !config?.useImageMatching || !action.event.img_patch_b64) {
             return;
         }
         if (this.smartClickInFlight.has(index) || this.smartClickResults.has(index)) return;
         this.smartClickInFlight.add(index);
         const promise = this.resolveSmartClick(action.event, expected)
-            .then(coords => {
-                this.smartClickResults.set(index, { coords, ready: true });
-                return coords;
+            .then(result => {
+                this.smartClickResults.set(index, { coords: result.coords, ready: true, matched: result.matched });
+                return result;
             })
             .finally(() => {
                 this.smartClickInFlight.delete(index);
@@ -401,31 +423,32 @@ export class PlaybackEngine extends EventEmitter {
     private async getSmartClickCoords(index: number, expected: { x: number; y: number }) {
         const cached = this.smartClickResults.get(index);
         if (cached?.ready) {
-            return cached.coords;
+            return { coords: cached.coords, matched: cached.matched };
         }
 
         const inflight = this.smartClickPromises.get(index);
         if (inflight) {
             try {
-                const coords = await Promise.race([
+                const result = await Promise.race([
                     inflight,
                     new Promise<null>((resolve) =>
                         setTimeout(() => resolve(null), PlaybackEngine.SMART_CLICK_AWAIT_TIMEOUT_MS)
                     ),
                 ]);
-                if (coords) return coords;
+                if (result) return result;
             } catch {
                 // resolve failed; fall back to expected
             }
         }
 
-        return expected;
+        return { coords: expected, matched: false };
     }
 
     private async resolveSmartClick(event: RecordedEvent, expected: { x: number; y: number }) {
         const config = this.config;
+        const missed = { coords: expected, matched: false };
         if (!config?.useImageMatching || !event.img_patch_b64) {
-            return expected;
+            return missed;
         }
 
         const searchRadius = config.imageSearchRadius ?? 160;
@@ -454,8 +477,11 @@ export class PlaybackEngine extends EventEmitter {
                         successfulMatches: this.status.successfulMatches + 1,
                     };
                     return {
-                        x: region.x + response.bestMatch.x,
-                        y: region.y + response.bestMatch.y,
+                        coords: {
+                            x: region.x + response.bestMatch.x,
+                            y: region.y + response.bestMatch.y,
+                        },
+                        matched: true,
                     };
                 }
 
@@ -463,13 +489,13 @@ export class PlaybackEngine extends EventEmitter {
                     const errorText = response.error.toLowerCase();
                     if (errorText.includes('econnrefused') || errorText.includes('fetch failed')) {
                         this.status = { ...this.status };
-                        return expected;
+                        return missed;
                     }
                 }
             } catch (error: any) {
                 const text = String(error?.message ?? '').toLowerCase();
                 if (text.includes('econnrefused') || text.includes('fetch failed')) {
-                    return expected;
+                    return missed;
                 }
                 this.status = { ...this.status, lastError: 'image_match_failed' };
             }
@@ -497,8 +523,11 @@ export class PlaybackEngine extends EventEmitter {
                     successfulMatches: this.status.successfulMatches + 1,
                 };
                 return {
-                    x: response.bestMatch.x,
-                    y: response.bestMatch.y,
+                    coords: {
+                        x: response.bestMatch.x,
+                        y: response.bestMatch.y,
+                    },
+                    matched: true,
                 };
             }
         } catch {
@@ -506,7 +535,7 @@ export class PlaybackEngine extends EventEmitter {
         }
 
         this.status = { ...this.status, failedMatches: this.status.failedMatches + 1 };
-        return expected;
+        return missed;
     }
 
     private playKeyDown(event: RecordedEvent) {

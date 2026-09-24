@@ -29,5 +29,6 @@ Preconditions:
 - The verify bridge stops a recording with one sample of each kind. That proves the dialog. It does not prove `uiohook-napi` or `/dev/input/js*`.
 - Trackpad taps and two-finger scroll are pointer clicks and wheel events. There is no separate trackpad type.
 - Side mouse buttons record as `back` and `forward`. `robotjs` may reject them at playback time.
+- SmartClick retargets pointer clicks, motion anchors, and scrolls that carry `img_patch_b64`. A later move without a patch keeps the last match offset. Keys and gamepad samples stay on their own path. The engine proof is `client/tests/smartClickInputs.test.ts`.
 - Unknown pointer buttons are dropped. They are not stored as left clicks.
 - Gamepad recording reads Linux joystick devices when they are readable. Playback does not invent a keyboard substitute.

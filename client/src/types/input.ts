@@ -1,6 +1,7 @@
 import type { MouseButton } from './index';
 
 export const POINTER_MOVE_MIN_DISTANCE_PX = 4;
+export const VISUAL_ANCHOR_MIN_DISTANCE_PX = 48;
 export const GAMEPAD_AXIS_DEADZONE = 0.12;
 
 export const UIOHOOK_WHEEL_VERTICAL = 3;

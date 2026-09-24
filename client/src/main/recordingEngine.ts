@@ -1,6 +1,13 @@
 import { EventEmitter } from 'events';
 import { ModifierKey, RecordingConfig, RecordedEvent, WindowBounds } from '../types';
-import { GAMEPAD_AXIS_DEADZONE, mapHookKey, mapPointerButton, pointerMovedEnough, wheelDeltas } from '../types/input';
+import {
+    GAMEPAD_AXIS_DEADZONE,
+    VISUAL_ANCHOR_MIN_DISTANCE_PX,
+    mapHookKey,
+    mapPointerButton,
+    pointerMovedEnough,
+    wheelDeltas,
+} from '../types/input';
 import { capturePatch } from './screenCapture';
 import { computeDHash, computeSha256 } from './imageHash';
 import { GamepadSample, GamepadSource } from './gamepadSource';
@@ -64,6 +71,7 @@ export class RecordingEngine extends EventEmitter {
     private lastPadAxis = new Map<string, number>();
     private lastMousePosition = { x: 0, y: 0 };
     private lastMoveSample: { x: number; y: number; t_ms: number } | null = null;
+    private lastAnchor: { x: number; y: number } | null = null;
     private gamepadSource: GamepadSource | null;
     private gamepadTimer: NodeJS.Timeout | null = null;
     private gamepadActive = false;
@@ -135,6 +143,7 @@ export class RecordingEngine extends EventEmitter {
         this.pendingPadDown.clear();
         this.lastPadAxis.clear();
         this.lastMoveSample = null;
+        this.lastAnchor = null;
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
         this.attachListeners();
         this.inputHook.start();
@@ -214,9 +223,7 @@ export class RecordingEngine extends EventEmitter {
             event: recordedEvent,
         });
 
-        if (this.config.captureImages) {
-            void this.attachImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
-        }
+        this.anchorEvent(recordedEvent, event.x, event.y, true);
     }
 
     private attachListeners() {
@@ -254,6 +261,7 @@ export class RecordingEngine extends EventEmitter {
         };
         this.events.push(recordedEvent);
         this.emit('event', recordedEvent);
+        this.anchorEvent(recordedEvent, event.x, event.y, false);
     }
 
     private handleWheel(event: HookWheelEvent) {
@@ -279,6 +287,7 @@ export class RecordingEngine extends EventEmitter {
         };
         this.events.push(recordedEvent);
         this.emit('event', recordedEvent);
+        this.anchorEvent(recordedEvent, event.x, event.y, true);
     }
 
     private handleMouseDown(event: HookMouseEvent) {
@@ -316,9 +325,7 @@ export class RecordingEngine extends EventEmitter {
             event: recordedEvent,
         });
 
-        if (this.config.captureImages) {
-            void this.attachImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
-        }
+        this.anchorEvent(recordedEvent, event.x, event.y, true);
     }
 
     private async handleMouseUp(event: HookMouseEvent) {
@@ -585,6 +592,16 @@ export class RecordingEngine extends EventEmitter {
             rel_x: (x - bounds.x) / bounds.width,
             rel_y: (y - bounds.y) / bounds.height,
         };
+    }
+
+    private anchorEvent(event: RecordedEvent, x: number, y: number, always: boolean) {
+        if (!this.config?.captureImages) return;
+        if (!always && this.lastAnchor) {
+            const distance = Math.hypot(x - this.lastAnchor.x, y - this.lastAnchor.y);
+            if (distance < VISUAL_ANCHOR_MIN_DISTANCE_PX) return;
+        }
+        this.lastAnchor = { x, y };
+        void this.attachImageContext(event, x, y, this.config.imagePatchSize);
     }
 
     private async attachImageContext(event: RecordedEvent, x: number, y: number, size: number) {
