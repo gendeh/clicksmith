@@ -932,25 +932,23 @@ export class PlaybackEngine extends EventEmitter {
         const offsetNormX = typeof metadata?.ocr_anchor_norm_x === 'number' ? metadata.ocr_anchor_norm_x : 0;
         const offsetNormY = typeof metadata?.ocr_anchor_norm_y === 'number' ? metadata.ocr_anchor_norm_y : 0;
         const image = capturedImage ?? await captureRegion(stageRegion);
-        let items: OcrItem[] = [];
-        if (!capturedImage && Math.max(stageRegion.width, stageRegion.height) > 960) {
+        const wideWindow = !capturedImage && Math.max(stageRegion.width, stageRegion.height) > 960;
+        const readNeighborhood = async (): Promise<SmartClickCandidateSelection | null> => {
             const neighborhood = await this.ocrNeighborhood(image, stageRegion, expected);
-            if (neighborhood) {
-                const picked = await this.tryOcrSmartClickFallback(
-                    event,
-                    neighborhood.region,
-                    expected,
-                    threshold,
-                    Math.max(timeoutMs, 300),
-                    neighborhood.image
-                );
-                if (picked) return picked;
-            }
-            items = await this.readOcrItems(image, Math.max(timeoutMs, 340), true);
-        } else {
-            items = await this.readOcrItems(image, timeoutMs);
-        }
-        if (!items.length) return null;
+            if (!neighborhood) return null;
+            return this.tryOcrSmartClickFallback(
+                event,
+                neighborhood.region,
+                expected,
+                threshold,
+                Math.max(timeoutMs, 300),
+                neighborhood.image
+            );
+        };
+        const items = wideWindow
+            ? await this.readOcrItems(image, Math.max(timeoutMs, 300), true)
+            : await this.readOcrItems(image, timeoutMs);
+        if (!items.length) return wideWindow ? readNeighborhood() : null;
         const phraseTokens = rawText
             .split(' ')
             .filter(token => token.length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN);
@@ -1040,8 +1038,9 @@ export class PlaybackEngine extends EventEmitter {
                 x: best.coords.x,
                 y: best.coords.y,
             });
+            return best;
         }
-        return best;
+        return wideWindow ? readNeighborhood() : null;
     }
 
     private getScaleShiftEvidence(

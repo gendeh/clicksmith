@@ -204,3 +204,92 @@ liveMatch('a scrolled Coral word stays on the word when the window is not at the
     );
   }
 }, 30000);
+
+liveMatch('a scrolled line still clicks the rare word inside the click wait', async () => {
+  const fs = require('fs') as typeof import('fs');
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const zoomedPng = await fs.promises.readFile(zoomedFile);
+  const meta = await sharp(zoomedPng).metadata();
+  const frameW = meta.width ?? 1100;
+  const frameH = meta.height ?? 800;
+  const shifted = await sharp({
+    create: { width: frameW, height: frameH, channels: 3, background: { r: 245, g: 247, b: 251 } },
+  })
+    .composite([{ input: zoomedPng, left: 0, top: scrollPx }])
+    .png()
+    .toBuffer();
+  const patch = await sharp({
+    create: { width: 128, height: 128, channels: 3, background: { r: 10, g: 20, b: 30 } },
+  })
+    .png()
+    .toBuffer();
+  const noise = Buffer.alloc(384 * 384 * 3);
+  for (let i = 0; i < noise.length; i += 1) noise[i] = (i * 17) % 256;
+  const context = await sharp(noise, { raw: { width: 384, height: 384, channels: 3 } }).png().toBuffer();
+  const point = center(recordedBox);
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockImplementation(async (region) => {
+    const left = Math.max(0, Math.min(frameW - 1, Math.round(region.x)));
+    const top = Math.max(0, Math.min(frameH - 1, Math.round(region.y)));
+    const width = Math.max(1, Math.min(frameW - left, Math.round(region.width)));
+    const height = Math.max(1, Math.min(frameH - top, Math.round(region.height)));
+    return sharp(shifted).extract({ left, top, width, height }).png().toBuffer();
+  });
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: {
+      getTargetBounds: () => ({ x: 0, y: 0, width: frameW, height: frameH }),
+      getTargetBoundsAsync: async () => ({ x: 0, y: 0, width: frameW, height: frameH }),
+    } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-scrolled-line',
+    target: 'Terminal',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: true,
+    imageSearchRadius: 160,
+  };
+  engine.status = engine.createStatus('playing');
+  const event = {
+    t_ms: 0,
+    type: 'mouse',
+    btn: 'left',
+    x: point.x,
+    y: point.y,
+    rel_x: point.x / frameW,
+    rel_y: point.y / frameH,
+    duration_ms: 0,
+    human_override: false,
+    img_patch_b64: patch.toString('base64'),
+    img_context_b64: context.toString('base64'),
+    metadata: {
+      ocr_primary_text_normalized: 'target d coral',
+      ocr_anchor_norm_x: 0.4,
+      ocr_anchor_norm_y: 0.4,
+    },
+  };
+  const started = Date.now();
+  const result = await engine.getSmartClickCoords(0, event, point);
+  const elapsed = Date.now() - started;
+  const status = engine.getStatus();
+  captureSpy.mockRestore();
+  screenSpy.mockRestore();
+  const word = { x: 649.5, y: 525.5 };
+  const nearWord = Math.abs(result.x - word.x) <= 14 && Math.abs(result.y - word.y) <= 14;
+  if (!nearWord || elapsed >= 460 || status.smartClickLastMethod !== 'ocr' || !(status.smartClickLastConfidence > 0.6) || status.smartClickLastSource !== 'window') {
+    throw new Error(
+      `click (${result.x}, ${result.y}) word (${word.x}, ${word.y}) ${status.smartClickLastMethod} ${status.smartClickLastConfidence} source ${status.smartClickLastSource} elapsed ${elapsed}`
+    );
+  }
+}, 30000);
