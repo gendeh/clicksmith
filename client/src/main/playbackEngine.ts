@@ -814,6 +814,42 @@ export class PlaybackEngine extends EventEmitter {
         return '';
     }
 
+    private async ocrNeighborhood(
+        image: Buffer,
+        stageRegion: WindowBounds,
+        expected: { x: number; y: number }
+    ): Promise<{ image: Buffer; region: WindowBounds } | null> {
+        const size = 448;
+        try {
+            const sharp = this.getSharp();
+            const metadata = await sharp(image).metadata();
+            const width = metadata.width ?? 0;
+            const height = metadata.height ?? 0;
+            if (width < 96 || height < 96) return null;
+            const safeSize = Math.max(8, Math.min(size, width, height));
+            const half = Math.floor(safeSize / 2);
+            const centerX = expected.x - stageRegion.x;
+            const centerY = expected.y - stageRegion.y;
+            const left = Math.max(0, Math.min(Math.round(centerX) - half, width - safeSize));
+            const top = Math.max(0, Math.min(Math.round(centerY) - half, height - safeSize));
+            const cropped = await sharp(image)
+                .extract({ left, top, width: safeSize, height: safeSize })
+                .png()
+                .toBuffer();
+            return {
+                image: cropped,
+                region: {
+                    x: stageRegion.x + left,
+                    y: stageRegion.y + top,
+                    width: safeSize,
+                    height: safeSize,
+                },
+            };
+        } catch {
+            return null;
+        }
+    }
+
     private async tryOcrSmartClickFallback(
         event: RecordedEvent,
         stageRegion: WindowBounds,
@@ -830,6 +866,20 @@ export class PlaybackEngine extends EventEmitter {
         const offsetNormX = typeof metadata?.ocr_anchor_norm_x === 'number' ? metadata.ocr_anchor_norm_x : 0;
         const offsetNormY = typeof metadata?.ocr_anchor_norm_y === 'number' ? metadata.ocr_anchor_norm_y : 0;
         const image = capturedImage ?? await captureRegion(stageRegion);
+        if (Math.max(stageRegion.width, stageRegion.height) > 960) {
+            const neighborhood = await this.ocrNeighborhood(image, stageRegion, expected);
+            if (neighborhood) {
+                const picked = await this.tryOcrSmartClickFallback(
+                    event,
+                    neighborhood.region,
+                    expected,
+                    threshold,
+                    Math.max(timeoutMs, 300),
+                    neighborhood.image
+                );
+                if (picked) return picked;
+            }
+        }
         const response = await this.imageService.ocrImage({
             image: image.toString('base64'),
             timeoutMs,
