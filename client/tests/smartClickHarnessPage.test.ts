@@ -232,3 +232,106 @@ liveMatch('an eighty percent harness page clicks the recorded Sunflower patch', 
     );
   }
 }, 30000);
+
+const oneTwentyFile = path.join(__dirname, 'fixtures/harness-120.png');
+const oneTwentyClicks = [
+  {
+    name: 'coral',
+    recorded: { x: 572, y: 154.96875, w: 161.546875, h: 51.796875 },
+    visual: { x: 642.984375, y: 185.75, w: 193.046875, h: 61.34375 },
+  },
+  {
+    name: 'ocean',
+    recorded: { x: 75, y: 222.765625, w: 170.0625, h: 51.796875 },
+    visual: { x: 46.59375, y: 266.28125, w: 203.265625, h: 61.34375 },
+  },
+];
+
+liveMatch('a one hundred twenty percent harness page clicks the recorded Coral and Ocean patches', async () => {
+  const fs = require('fs') as typeof import('fs');
+  const sharp = require('sharp');
+  const imageService = new ImageService('http://127.0.0.1:5001');
+  expect(await imageService.healthCheck(800)).toBe(true);
+  const recordedPng = await fs.promises.readFile(recordedFile);
+  const zoomedPng = await fs.promises.readFile(oneTwentyFile);
+  const meta = await sharp(zoomedPng).metadata();
+  const frameW = meta.width ?? 1100;
+  const frameH = meta.height ?? 800;
+  const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockImplementation(async (region) => {
+    const extractLeft = Math.max(0, Math.min(frameW - 1, Math.round(region.x)));
+    const extractTop = Math.max(0, Math.min(frameH - 1, Math.round(region.y)));
+    const width = Math.max(1, Math.min(frameW - extractLeft, Math.round(region.width)));
+    const height = Math.max(1, Math.min(frameH - extractTop, Math.round(region.height)));
+    return sharp(zoomedPng).extract({ left: extractLeft, top: extractTop, width, height }).png().toBuffer();
+  });
+  const screenSpy = jest.spyOn(screenCapture, 'captureScreen').mockImplementation(async () => {
+    throw new Error('full screen capture');
+  });
+  const engine = new PlaybackEngine({
+    inputPlayer: {} as any,
+    imageService,
+    windowManager: {
+      getTargetBounds: () => ({ x: 0, y: 0, width: frameW, height: frameH }),
+      getTargetBoundsAsync: async () => ({ x: 0, y: 0, width: frameW, height: frameH }),
+    } as any,
+  }) as any;
+  engine.config = {
+    profileId: 'live-harness-120',
+    target: 'Terminal',
+    useImageMatching: true,
+    imageMatchThreshold: 0.6,
+    timingTolerance: 20,
+    retryCount: 0,
+    retryDelay: 10,
+    takeoverHotkey: 'F11',
+    speedMultiplier: 1,
+    useRelativeCoords: true,
+    imageSearchRadius: 160,
+  };
+  engine.status = engine.createStatus('playing');
+  try {
+    for (const item of oneTwentyClicks) {
+      const point = center(item.recorded);
+      const size = 128;
+      const left = Math.max(0, Math.round(point.x - size / 2));
+      const top = Math.max(0, Math.round(point.y - size / 2));
+      const patch = await sharp(recordedPng).extract({ left, top, width: size, height: size }).png().toBuffer();
+      const recordedHash = await computeDHash(patch);
+      const started = Date.now();
+      const result = await engine.resolveSmartClick(
+        {
+          t_ms: 0,
+          type: 'mouse',
+          btn: 'left',
+          x: point.x,
+          y: point.y,
+          rel_x: point.x / frameW,
+          rel_y: point.y / frameH,
+          duration_ms: 0,
+          human_override: false,
+          img_patch_b64: patch.toString('base64'),
+          metadata: { img_dhash: recordedHash },
+        },
+        point
+      );
+      const elapsed = Date.now() - started;
+      const status = engine.getStatus();
+      const visual = center(item.visual);
+      const off = Math.hypot(result.x - visual.x, result.y - visual.y);
+      if (
+        off > 8 ||
+        elapsed >= 460 ||
+        status.smartClickLastMethod !== 'template' ||
+        !(status.smartClickLastConfidence > 0.6) ||
+        status.smartClickLastSource !== 'window'
+      ) {
+        throw new Error(
+          `${item.name} click (${result.x}, ${result.y}) button (${visual.x.toFixed(1)}, ${visual.y.toFixed(1)}) off ${off.toFixed(1)} ${status.smartClickLastMethod} ${status.smartClickLastConfidence} source ${status.smartClickLastSource} elapsed ${elapsed}`
+        );
+      }
+    }
+  } finally {
+    captureSpy.mockRestore();
+    screenSpy.mockRestore();
+  }
+}, 30000);

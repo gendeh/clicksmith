@@ -228,6 +228,49 @@ def test_zoomed_patch_is_found_on_its_own_scale(monkeypatch):
     assert calls["n"] <= 3
 
 
+def test_recorded_coral_and_ocean_click_the_one_hundred_twenty_percent_page():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "client" / "tests" / "fixtures"
+    recorded = cv2.imread(str(root / "harness-100.png"))
+    page = cv2.imread(str(root / "harness-120.png"))
+    recorded_boxes = {
+        "coral": (572, 154.96875, 161.546875, 51.796875),
+        "ocean": (75, 222.765625, 170.0625, 51.796875),
+    }
+    visual = {
+        "coral": (642.984375 + 193.046875 / 2, 185.75 + 61.34375 / 2),
+        "ocean": (46.59375 + 203.265625 / 2, 266.28125 + 61.34375 / 2),
+    }
+    app = create_app()
+    client = app.test_client()
+    for name, (x, y, w, h) in recorded_boxes.items():
+        cx, cy = x + w / 2, y + h / 2
+        left, top = int(round(cx - 64)), int(round(cy - 64))
+        template = recorded[top : top + 128, left : left + 128]
+        res = post_match(
+            client,
+            template,
+            page,
+            threshold=0.6,
+            min_scale=0.7,
+            max_scale=1.4,
+            scale_hint=1.0,
+            method="template",
+            max_budget_ms=260,
+        )
+        assert res.status_code == 200
+        data = res.get_json()
+        assert data["success"] is True
+        match = data["bestMatch"]
+        vx, vy = visual[name]
+        assert float(match["confidence"]) > 0.6
+        assert abs(float(match["scale"]) - 1.2) <= 0.08
+        assert abs(float(match["x"]) - vx) <= 8
+        assert abs(float(match["y"]) - vy) <= 8
+        assert int(data["processingTimeMs"]) <= 260
+
+
 def test_recorded_sunflower_clicks_the_eighty_percent_page():
     from pathlib import Path
 

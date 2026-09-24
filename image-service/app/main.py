@@ -124,9 +124,10 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
     template_h, template_w = template.shape[:2]
     factor = _template_pyramid_factor(template, search_area)
     if factor == 1:
-        return _match_template_direct(
+        best_match, matches, peak = _match_template_direct(
             template, search_area, threshold, find_all, max_matches, template_scale
         )
+        return best_match, matches, peak, True
     small_template = cv2.resize(
         template,
         (template_w // factor, template_h // factor),
@@ -134,19 +135,20 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
     )
     small_h, small_w = small_template.shape[:2]
     if small_h < 8 or small_w < 8:
-        return _match_template_direct(
+        best_match, matches, peak = _match_template_direct(
             template, search_area, threshold, find_all, max_matches, template_scale
         )
+        return best_match, matches, peak, True
     small_search = cv2.resize(
         search_area,
         (width // factor, height // factor),
         interpolation=cv2.INTER_AREA,
     )
-    _coarse, coarse_matches, _coarse_peak = _match_template_direct(
+    _coarse, coarse_matches, coarse_peak = _match_template_direct(
         small_template, small_search, threshold, find_all, max_matches, template_scale
     )
     if not coarse_matches:
-        return None, [], 0.0
+        return None, [], coarse_peak, False
     refined = []
     refined_peak = 0.0
     margin = max(16, factor * 4)
@@ -185,14 +187,14 @@ def match_template(template, search_area, threshold, find_all, max_matches, temp
         if not find_all and refined:
             break
     if not refined:
-        return None, [], refined_peak
+        return None, [], refined_peak, True
     refined.sort(key=lambda item: float(item.get("score", item.get("confidence", 0.0))), reverse=True)
     limit = max(1, min(MAX_MATCHES, int(max_matches)))
     if find_all:
         refined = refined[:limit]
     else:
         refined = [refined[0]]
-    return refined[0], refined, refined_peak
+    return refined[0], refined, refined_peak, True
 
 
 def _clamp_float(value, low, high, default):
@@ -321,13 +323,13 @@ def match_template_multiscale(
             )
         height, width = scaled_template.shape[:2]
         if height < 4 or width < 4 or height > search_area.shape[0] or width > search_area.shape[1]:
-            return None, []
+            return None, [], 0.0, True
         scale_started = time.perf_counter()
-        candidate_best, candidate_matches, peak = match_template(
+        candidate_best, candidate_matches, peak, measured = match_template(
             scaled_template, search_area, threshold, find_all, max_matches, template_scale=scale
         )
         scale_cost_s = max(scale_cost_s, time.perf_counter() - scale_started)
-        return candidate_best, candidate_matches, peak
+        return candidate_best, candidate_matches, peak, measured
 
     if low_variance:
         ordered = sorted(set(scales))
@@ -335,7 +337,7 @@ def match_template_multiscale(
         high = len(ordered) - 1
         while low <= high and scale_fits():
             mid = (low + high) // 2
-            candidate_best, candidate_matches, _peak = match_at_scale(ordered[mid])
+            candidate_best, candidate_matches, _peak, _measured = match_at_scale(ordered[mid])
             if candidate_best:
                 best_match = candidate_best
                 best_scale = ordered[mid]
@@ -347,12 +349,16 @@ def match_template_multiscale(
     else:
         tried = 0
         best_peak = 0.0
+        coarse_hint = 0.0
         for scale in scales:
             if not scale_fits():
                 break
             tried += 1
-            candidate_best, candidate_matches, peak = match_at_scale(scale)
-            best_peak = max(best_peak, peak)
+            candidate_best, candidate_matches, peak, measured = match_at_scale(scale)
+            if measured:
+                best_peak = max(best_peak, peak)
+            else:
+                coarse_hint = max(coarse_hint, peak)
             if candidate_best and prefer_candidate(candidate_best, best_match):
                 best_match = candidate_best
                 best_scale = scale
@@ -364,7 +370,13 @@ def match_template_multiscale(
             if tried >= 6 and best_match and score_of(best_match) >= CLICKABLE_TEMPLATE_CONFIDENCE:
                 stopped_on_decisive = True
                 break
-            if tried >= 5 and best_peak < HOPELESS_TEMPLATE_CONFIDENCE:
+            if tried >= 5 and best_peak < HOPELESS_TEMPLATE_CONFIDENCE and coarse_hint < HOPELESS_TEMPLATE_CONFIDENCE:
+                break
+            if (
+                tried >= 8
+                and best_peak < HOPELESS_TEMPLATE_CONFIDENCE
+                and (best_match is None or score_of(best_match) < CLICKABLE_TEMPLATE_CONFIDENCE)
+            ):
                 break
 
     if not stopped_on_decisive and best_scale is not None and scale_fits():
@@ -385,7 +397,7 @@ def match_template_multiscale(
             if h < 4 or w < 4 or h > search_area.shape[0] or w > search_area.shape[1]:
                 continue
             scale_started = time.perf_counter()
-            candidate_best, candidate_matches, _peak = match_template(
+            candidate_best, candidate_matches, _peak, _measured = match_template(
                 scaled_template, search_area, threshold, find_all, max_matches, template_scale=scale
             )
             scale_cost_s = max(scale_cost_s, time.perf_counter() - scale_started)
