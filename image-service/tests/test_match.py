@@ -228,6 +228,80 @@ def test_zoomed_patch_is_found_on_its_own_scale(monkeypatch):
     assert calls["n"] <= 3
 
 
+def test_recorded_sunflower_clicks_the_eighty_percent_page():
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "client" / "tests" / "fixtures"
+    recorded = cv2.imread(str(root / "harness-100.png"))
+    page = cv2.imread(str(root / "harness-80.png"))
+    point_x, point_y = 75 + 199.640625 / 2, 154.96875 + 51.796875 / 2
+    size = 128
+    left, top = int(round(point_x - size / 2)), int(round(point_y - size / 2))
+    template = recorded[top : top + size, left : left + size]
+    app = create_app()
+    client = app.test_client()
+    res = post_match(
+        client,
+        template,
+        page,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="template",
+        max_budget_ms=260,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    visual_x = 170.1875 + 158.5 / 2
+    visual_y = 124.125 + 40.21875 / 2
+    assert float(match["confidence"]) > 0.6
+    assert abs(float(match["scale"]) - 0.8) <= 0.08
+    assert abs(float(match["x"]) - visual_x) <= 8
+    assert abs(float(match["y"]) - visual_y) <= 8
+    assert int(data["processingTimeMs"]) <= 260
+
+
+def test_eighty_percent_patch_clicks_that_scale():
+    app = create_app()
+    client = app.test_client()
+    template = make_feature_template(128)
+    origin = (199, 93)
+    scale = 0.8
+    scaled = cv2.resize(
+        template,
+        dsize=None,
+        fx=scale,
+        fy=scale,
+        interpolation=cv2.INTER_AREA,
+    )
+    search = np.full((640, 640, 3), 30, dtype=np.uint8)
+    height, width = scaled.shape[:2]
+    search[origin[1] : origin[1] + height, origin[0] : origin[0] + width] = scaled
+    res = post_match(
+        client,
+        template,
+        search,
+        threshold=0.6,
+        min_scale=0.7,
+        max_scale=1.4,
+        scale_hint=1.0,
+        method="template",
+        max_budget_ms=260,
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    match = data["bestMatch"]
+    center_x, center_y = expected_center(template, scale, origin)
+    assert float(match["confidence"]) > 0.6
+    assert abs(float(match["scale"]) - scale) <= 0.08
+    assert abs(float(match["x"]) - center_x) <= 8
+    assert abs(float(match["y"]) - center_y) <= 8
+
+
 def test_match_endpoint_in_range_scale_1_3():
     app = create_app()
     client = app.test_client()
