@@ -89,7 +89,7 @@ export class RunLifecycleManager {
             case 'finalize_done':
                 return 'idle';
             case 'takeover_click':
-                return 'idle';
+                return 'takeover_live';
             case 'pause':
                 return 'paused';
             case 'unpause':

@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { GameDefinition, matchGame } from '../domain/gameCatalog';
 import {
   AutoTuneSettings,
   IPC_CHANNELS,
@@ -57,6 +58,8 @@ const App: React.FC = () => {
   const [billingMessage, setBillingMessage] = useState<string | null>(null);
   const [modAdapters, setModAdapters] = useState<ModAdapterStatus[]>([]);
   const [modMessage, setModMessage] = useState<string | null>(null);
+  const [games, setGames] = useState<GameDefinition[]>([]);
+  const [selectedGameId, setSelectedGameId] = useState<string | null>(null);
   const [saveForm, setSaveForm] = useState({
     name: '',
     notes: '',
@@ -93,6 +96,11 @@ const App: React.FC = () => {
   const isRecordingArmed = recordingState === 'armed';
   const isRecordingBusy = isRecordingActive || isRecordingArmed || recordingState === 'paused';
   const recordingOverlayLabel = isRecordingActive ? 'LIVE' : isRecordingArmed ? 'ARMED' : 'REC';
+  const matchedGame = useMemo(() => {
+    if (selectedGameId) return games.find(game => game.id === selectedGameId);
+    return matchGame({ version: 1, games }, activeTarget);
+  }, [activeTarget, games, selectedGameId]);
+  const appendedCount = draft?.events.filter(event => event.human_override).length ?? 0;
 
   const openSaveModalForDraft = (nextDraft: DraftProfile) => {
     setDraft(nextDraft);
@@ -146,9 +154,19 @@ const App: React.FC = () => {
       setEulaAccepted(data.eulaAccepted);
     });
     void ipc.invoke(IPC_CHANNELS.MODS_LIST).then((data: ModAdapterStatus[]) => setModAdapters(data || []));
+    void ipc.invoke(IPC_CHANNELS.GAMES_LIST).then((data: { games?: GameDefinition[] }) => {
+      setGames(Array.isArray(data?.games) ? data.games : []);
+    });
 
     ipc.on(IPC_CHANNELS.RECORDING_STATUS, (_: any, status: { state: string; error?: string }) => {
-      setRecordingState(status.state);
+      if (
+        status.state === 'idle' ||
+        status.state === 'armed' ||
+        status.state === 'recording' ||
+        status.state === 'paused'
+      ) {
+        setRecordingState(status.state);
+      }
       if (status.error) {
         setRecordingError(status.error);
       } else if (status.state === 'armed' || status.state === 'recording') {
@@ -258,8 +276,15 @@ const App: React.FC = () => {
     ipc.invoke(IPC_CHANNELS.PLAYBACK_STOP);
   };
 
+  const selectGame = (game: GameDefinition) => {
+    setSelectedGameId(game.id);
+    const windowTitle = targetOptions.find(target => matchGame({ version: 1, games }, target.title)?.id === game.id)
+      ?.title;
+    if (windowTitle) setActiveTarget(windowTitle);
+  };
+
   const triggerTakeover = () => {
-    ipc.invoke(IPC_CHANNELS.PLAYBACK_TAKEOVER);
+    ipc.invoke(IPC_CHANNELS.PLAYBACK_TAKEOVER, { target: activeTarget });
   };
 
   const handleSaveDraft = async () => {
@@ -479,6 +504,11 @@ const App: React.FC = () => {
               {draft.events.length} events captured against <strong>{draft.target_app}</strong>. Choose whether
               to keep the new sequence or discard it.
             </p>
+            {appendedCount > 0 && (
+              <p data-testid="takeover-summary">
+                Appended {appendedCount} of your clicks and keys. The macro tail was replaced.
+              </p>
+            )}
             <div style={{ display: 'grid', gap: '10px' }}>
               <input
                 className="input"
@@ -554,7 +584,7 @@ const App: React.FC = () => {
         <section className="card controls-card" data-testid="controls-card">
           <div className="card-header">
             <h2>Controls</h2>
-            <span className="hint">Hotkeys: F9 · F10 · Auto takeover on click</span>
+            <span className="hint">You record it. Takeover appends your clicks and keys.</span>
           </div>
           <div className="control-stack">
             <button
@@ -580,13 +610,38 @@ const App: React.FC = () => {
           </div>
 
           <div className="field">
+            <span className="field-label">Game</span>
+            <div className="game-row" data-testid="game-catalog">
+              {games.map(game => (
+                <button
+                  key={game.id}
+                  type="button"
+                  className="btn btn-ghost"
+                  data-testid={`game-${game.id}`}
+                  aria-pressed={selectedGameId === game.id}
+                  onClick={() => selectGame(game)}
+                >
+                  {game.name}
+                </button>
+              ))}
+            </div>
+            <div className="profile-meta" data-testid="game-match">
+              {matchedGame ? matchedGame.name : 'Any window'}
+            </div>
+          </div>
+
+          <div className="field">
             <span className="field-label">Target window</span>
             <select
               className="input"
               data-testid="select-target"
               aria-label="Target window"
               value={activeTarget}
-              onChange={event => setActiveTarget(event.target.value)}
+              onChange={event => {
+                const title = event.target.value;
+                setActiveTarget(title);
+                setSelectedGameId(matchGame({ version: 1, games }, title)?.id ?? null);
+              }}
             >
               <option value="screen">Screen</option>
               {targetOptions.map(target => (
@@ -632,6 +687,7 @@ const App: React.FC = () => {
                 </div>
                 <div className="profile-meta">
                   {profile.events.length} events · {profile.target_app}
+                  {profile.metadata?.override_count ? ` · ${profile.metadata.override_count} yours` : ''}
                 </div>
                 <div style={{ display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                   {profile.metadata?.tags?.map(tag => (
@@ -811,25 +867,32 @@ const App: React.FC = () => {
               {playbackStatus?.lastError ? `, last: ${playbackStatus.lastError}` : ''}.
             </div>
 
-            <div className="adapter-card">
-              <div>
-                <div className="adapter-title">Geode Adapter</div>
-                <div className="profile-meta">
-                  {geodeAdapter ? `Connection: ${geodeAdapter.connection}` : 'No adapter configured.'}
+            {modAdapters.length === 0 && (
+              <div className="adapter-card">
+                <div className="profile-meta">No adapter configured.</div>
+              </div>
+            )}
+            {modAdapters.map(status => (
+              <div className="adapter-card" key={status.adapter.id} data-testid={`adapter-${status.adapter.id}`}>
+                <div>
+                  <div className="adapter-title">
+                    {status.adapter.id === 'geode-geometry-dash' ? 'Geode Adapter' : status.adapter.name}
+                  </div>
+                  <div className="profile-meta">Connection: {status.connection}</div>
+                  {status.lastError && <div className="profile-meta">Last error: {status.lastError}</div>}
                 </div>
-                {geodeAdapter?.lastError && <div className="profile-meta">Last error: {geodeAdapter.lastError}</div>}
-              </div>
-              <div className="adapter-actions">
-                <button className="btn btn-ghost" onClick={() => handleModProbe(geodeAdapter?.adapter.id ?? '')}>
-                  Check
-                </button>
-                {geodeAdapter?.adapter.launch && (
-                  <button className="btn btn-primary" onClick={() => handleModLaunch(geodeAdapter.adapter.id)}>
-                    Launch
+                <div className="adapter-actions">
+                  <button className="btn btn-ghost" onClick={() => handleModProbe(status.adapter.id)}>
+                    Check
                   </button>
-                )}
+                  {status.adapter.launch && (
+                    <button className="btn btn-primary" onClick={() => handleModLaunch(status.adapter.id)}>
+                      Launch
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
+            ))}
             {modMessage && <div className="profile-meta">{modMessage}</div>}
             <div className="adapter-links">
               {geodeAdapter?.adapter.install?.instructionsPath && (

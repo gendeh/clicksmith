@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "screenFallbackAdapterId": "geode-geometry-dash",
+  "games": [
+    {
+      "id": "geometry-dash",
+      "name": "Geometry Dash",
+      "summary": "Record your own clicks. The Geode adapter is optional and only used when this window matches.",
+      "windowHints": ["geometry dash"],
+      "inputs": ["mouse", "keyboard"],
+      "adapterId": "geode-geometry-dash"
+    },
+    {
+      "id": "genshin-impact",
+      "name": "Genshin Impact",
+      "summary": "Author your own clicks and keys against the game window. The loopback adapter does not attach to the game.",
+      "windowHints": ["genshin impact", "genshin"],
+      "inputs": ["mouse", "keyboard"],
+      "adapterId": "genshin-impact-os"
+    },
+    {
+      "id": "minecraft",
+      "name": "Minecraft",
+      "summary": "Author your own clicks and keys against the Minecraft window. The loopback adapter does not attach to the game.",
+      "windowHints": ["minecraft"],
+      "inputs": ["mouse", "keyboard"],
+      "adapterId": "minecraft-os"
+    }
+  ]
+}

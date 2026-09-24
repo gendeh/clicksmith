@@ -35,6 +35,32 @@
         "statusUrl": "http://127.0.0.1:27737/status",
         "baseUrl": "http://127.0.0.1:27737"
       }
+    },
+    {
+      "id": "genshin-impact-os",
+      "name": "Genshin Impact authoring",
+      "framework": "loopback",
+      "game": "Genshin Impact",
+      "description": "Loopback stand-in for recording your own clicks and keys. It does not attach to the game. When it is down, Clicksmith uses OS input on the window.",
+      "platforms": ["win32", "darwin", "linux"],
+      "protocol": {
+        "type": "local-http",
+        "statusUrl": "http://127.0.0.1:27738/status",
+        "baseUrl": "http://127.0.0.1:27738"
+      }
+    },
+    {
+      "id": "minecraft-os",
+      "name": "Minecraft authoring",
+      "framework": "loopback",
+      "game": "Minecraft",
+      "description": "Loopback stand-in for recording your own clicks and keys. It does not attach to the game. When it is down, Clicksmith uses OS input on the window.",
+      "platforms": ["win32", "darwin", "linux"],
+      "protocol": {
+        "type": "local-http",
+        "statusUrl": "http://127.0.0.1:27739/status",
+        "baseUrl": "http://127.0.0.1:27739"
+      }
     }
   ]
 }

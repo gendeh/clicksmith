@@ -1,24 +1,47 @@
+import catalogJson from '../../../games/catalog.json';
+import registryJson from '../../../mods/registry.json';
+import { parseGameCatalog } from '../domain/gameCatalog';
+import { mergeTakeoverEvents } from '../domain/takeoverAppend';
 import {
   IPC_CHANNELS,
   PlaybackStatus,
   Profile,
+  RecordedEvent,
   TIER_LIMITS,
   UserPreferences,
 } from '../types';
 
+const gameCatalog = parseGameCatalog(catalogJson);
+
 type Listener = (event: unknown, ...args: unknown[]) => void;
 
-const SAMPLE_EVENT = {
+function inputEvent(partial: Pick<RecordedEvent, 't_ms' | 'type'> & Partial<RecordedEvent>): RecordedEvent {
+  return {
+    x: 0,
+    y: 0,
+    rel_x: 0,
+    rel_y: 0,
+    duration_ms: 16,
+    human_override: false,
+    ...partial,
+  };
+}
+
+const SAMPLE_EVENT = inputEvent({
   t_ms: 120,
-  type: 'mouse' as const,
-  btn: 'left' as const,
+  type: 'mouse',
+  btn: 'left',
   x: 640,
   y: 420,
   rel_x: 0.5,
   rel_y: 0.5,
   duration_ms: 12,
-  human_override: false,
-};
+});
+
+const SEED_EVENTS: RecordedEvent[] = [
+  inputEvent({ t_ms: 0, type: 'mouse', btn: 'left', x: 100, y: 80, rel_x: 0.1, rel_y: 0.1 }),
+  inputEvent({ t_ms: 500, type: 'keyboard', key: 'space', duration_ms: 30 }),
+];
 
 function nowIso() {
   return new Date().toISOString();
@@ -94,6 +117,7 @@ export function installVerifyBridge() {
     events: Profile['events'];
     success_metric: Profile['success_metric'];
     created_at: string;
+    metadata?: Profile['metadata'];
   } | null = null;
   let nextId = 1;
 
@@ -107,7 +131,8 @@ export function installVerifyBridge() {
 
   function makeProfile(name: string, notes: string, tags: string[]): Profile {
     const created = nowIso();
-    const events = draft?.events ?? [{ ...SAMPLE_EVENT }];
+    const events = draft?.events ?? SEED_EVENTS.map(event => ({ ...event }));
+    const overrideCount = events.filter(event => event.human_override).length;
     const id = `verify-${nextId++}`;
     return {
       id,
@@ -132,7 +157,7 @@ export function installVerifyBridge() {
         version: 1,
         total_duration_ms: events.reduce((max, event) => Math.max(max, event.t_ms + (event.duration_ms ?? 0)), 0),
         event_count: events.length,
-        override_count: 0,
+        override_count: overrideCount,
         tags,
         custom: { verify_bridge: '1' },
       },
@@ -174,7 +199,31 @@ export function installVerifyBridge() {
               isMinimized: false,
               isFocused: false,
             },
+            {
+              handle: 3,
+              title: 'Genshin Impact',
+              className: 'GenshinImpact',
+              processId: 300,
+              executablePath: '/usr/bin/genshin',
+              bounds: { x: 0, y: 0, width: 1920, height: 1080 },
+              isVisible: true,
+              isMinimized: false,
+              isFocused: false,
+            },
+            {
+              handle: 4,
+              title: 'Minecraft',
+              className: 'Minecraft',
+              processId: 400,
+              executablePath: '/usr/bin/minecraft',
+              bounds: { x: 0, y: 0, width: 1280, height: 720 },
+              isVisible: true,
+              isMinimized: false,
+              isFocused: false,
+            },
           ];
+        case IPC_CHANNELS.GAMES_LIST:
+          return gameCatalog;
         case IPC_CHANNELS.SETTINGS_GET:
           return {
             preferences,
@@ -186,17 +235,10 @@ export function installVerifyBridge() {
           return preferences;
         }
         case IPC_CHANNELS.MODS_LIST:
-          return [
-            {
-              adapter: {
-                id: 'geode-geometry-dash',
-                name: 'Geode',
-                install: { instructionsPath: 'docs/mods/geode.md', downloadUrl: '' },
-                launch: true,
-              },
-              connection: 'disconnected',
-            },
-          ];
+          return registryJson.adapters.map(adapter => ({
+            adapter,
+            connection: 'disconnected',
+          }));
         case IPC_CHANNELS.RECORDING_START:
           emit(IPC_CHANNELS.RECORDING_STATUS, { state: 'recording' });
           return { success: true };
@@ -229,10 +271,53 @@ export function installVerifyBridge() {
           playbackStatus = { ...playbackStatus, state: 'idle' };
           emit(IPC_CHANNELS.PLAYBACK_STATUS, playbackStatus);
           return { success: true };
-        case IPC_CHANNELS.PLAYBACK_TAKEOVER:
+        case IPC_CHANNELS.PLAYBACK_TAKEOVER: {
+          const requestedTarget =
+            payload && typeof payload === 'object' && typeof (payload as { target?: unknown }).target === 'string'
+              ? (payload as { target: string }).target
+              : null;
+          const profile = selectedProfileId ? profiles.get(selectedProfileId) : undefined;
+          if (playbackStatus.state === 'playing' && profile) {
+            const takeoverStartMs = 120;
+            const humanEvents = [
+              inputEvent({
+                t_ms: 0,
+                type: 'mouse',
+                btn: 'left',
+                x: 400,
+                y: 300,
+                rel_x: 0.4,
+                rel_y: 0.4,
+                human_override: true,
+              }),
+              inputEvent({ t_ms: 40, type: 'keyboard', key: 'e', human_override: true, duration_ms: 24 }),
+            ];
+            const merged = mergeTakeoverEvents(profile, takeoverStartMs, humanEvents);
+            draft = {
+              target_app: requestedTarget && requestedTarget !== 'screen' ? requestedTarget : profile.target_app,
+              events: merged,
+              success_metric: profile.success_metric,
+              created_at: nowIso(),
+              metadata: {
+                created_at: profile.created_at,
+                updated_at: nowIso(),
+                version: 1,
+                total_duration_ms: merged.reduce(
+                  (max, event) => Math.max(max, event.t_ms + (event.duration_ms ?? 0)),
+                  0
+                ),
+                event_count: merged.length,
+                override_count: merged.filter(event => event.human_override).length,
+                tags: ['takeover'],
+                custom: { takeover_start_ms: takeoverStartMs, game_id: requestedTarget ?? profile.target_app },
+              },
+            };
+            emit(IPC_CHANNELS.RUN_COMPLETE, { source: 'takeover', draft });
+          }
           playbackStatus = { ...playbackStatus, state: 'paused' };
           emit(IPC_CHANNELS.PLAYBACK_STATUS, playbackStatus);
           return { success: true };
+        }
         case IPC_CHANNELS.PLAYBACK_SELECT: {
           const profileId = (payload as { profileId?: string | null })?.profileId ?? null;
           if (!profileId || !profiles.has(profileId)) return { success: false, error: 'Profile not found' };

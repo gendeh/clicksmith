@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { startSyntheticAdapter } from '../../../../scripts/synthetic-adapter.mjs';
 import { openSync, mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
@@ -20,6 +21,8 @@ Commands:
   cleanup
   http GET|POST|PUT|DELETE <url> [--body JSON]
   drive manager-controls [--headed]
+  drive author-macro [--headed]
+  drive author-macro-api
   screenshot --path <file>
 `);
 }
@@ -293,6 +296,152 @@ async function driveManagerControls(headed) {
   console.log(JSON.stringify(proof, null, 2));
 }
 
+async function driveAuthorMacro(headed) {
+  const { chromium } = await import('playwright');
+  const state = readState();
+  mkdirSync(artifactsRoot, { recursive: true });
+  const shotDir = join(artifactsRoot, 'author-macro');
+  mkdirSync(shotDir, { recursive: true });
+  const browser = await chromium.launch({ headless: !headed });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+  await page.goto(state.urls.renderer, { waitUntil: 'domcontentloaded' });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15000 });
+  await page.locator('[data-testid="select-target"] option', { hasText: 'Minecraft' }).waitFor({ state: 'attached' });
+  await page.locator('[data-testid="game-minecraft"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="chip-target"]')?.textContent?.includes('Minecraft')
+  );
+  await page.locator('[data-testid="btn-play"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="chip-play"]')?.textContent?.toLowerCase().includes('running')
+  );
+  await page.screenshot({ path: join(shotDir, 'playing.png'), fullPage: true });
+  await page.locator('[data-testid="btn-takeover"]').click();
+  const summary = page.locator('[data-testid="takeover-summary"]');
+  await summary.waitFor();
+  const summaryText = await summary.innerText();
+  if (!summaryText.toLowerCase().includes('appended')) {
+    throw new Error(`Expected takeover summary to describe appended input, got ${JSON.stringify(summaryText)}`);
+  }
+  await page.screenshot({ path: join(shotDir, 'appended.png'), fullPage: true });
+  await page.locator('[data-testid="save-run-name"]').fill('Minecraft wheel grab');
+  await page.locator('[data-testid="save-run-confirm"]').click();
+  await page.locator('[data-testid="save-run-modal"]').waitFor({ state: 'detached' });
+  const savedCard = page.locator('[data-testid^="profile-card-"]', { hasText: 'Minecraft wheel grab' });
+  await savedCard.waitFor();
+  const savedText = await savedCard.innerText();
+  if (!savedText.toLowerCase().includes('yours')) {
+    throw new Error(`Saved profile did not keep the human segment, got ${JSON.stringify(savedText)}`);
+  }
+  await page.screenshot({ path: join(shotDir, 'saved.png'), fullPage: true });
+  const proof = {
+    feature: 'author-macro',
+    url: state.urls.renderer,
+    game: await page.locator('[data-testid="game-match"]').innerText(),
+    target: await page.locator('[data-testid="chip-target"]').innerText(),
+    takeoverSummary: summaryText,
+    savedProfile: savedText.split('\n')[0],
+    savedDetail: savedText,
+    artifacts: [
+      join(shotDir, 'playing.png'),
+      join(shotDir, 'appended.png'),
+      join(shotDir, 'saved.png'),
+    ],
+  };
+  writeFileSync(join(shotDir, 'proof.json'), JSON.stringify(proof, null, 2));
+  await browser.close();
+  console.log(JSON.stringify(proof, null, 2));
+}
+
+async function driveAuthorMacroApi() {
+  const state = readState();
+  const backend = state.urls.backend;
+  mkdirSync(artifactsRoot, { recursive: true });
+  const shotDir = join(artifactsRoot, 'author-macro-api');
+  mkdirSync(shotDir, { recursive: true });
+  const fixturePath = join(shotDir, 'merged-profile.json');
+  const jest = spawnSync(
+    'npm',
+    ['--prefix', 'client', 'test', '--', '--watchman=false', '--testPathPattern=takeoverAppend', '-t', 'writes the merged profile'],
+    {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      env: { ...process.env, CLICKSMITH_API_FIXTURE: fixturePath, CLICKSMITH_REPRO: '' },
+    }
+  );
+  if (jest.status !== 0) {
+    throw new Error(`${jest.stdout || ''}\n${jest.stderr || ''}`);
+  }
+  const profile = JSON.parse(readFileSync(fixturePath, 'utf8'));
+  const adapter = await startSyntheticAdapter({
+    id: 'minecraft-os',
+    name: 'Minecraft authoring',
+    game: 'Minecraft',
+    port: 0,
+  });
+  try {
+    const statusRes = await fetch(`${adapter.url}/status`);
+    const status = await statusRes.json();
+    if (status.id !== 'minecraft-os') {
+      throw new Error(`Adapter id was ${status.id}`);
+    }
+    const replay = await fetch(`${adapter.url}/replay/start`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ events: [{ t_ms: 0, button: 'left', down: true }] }),
+    });
+    if (!replay.ok) throw new Error(`replay/start ${replay.status}`);
+    const takeoverRes = await fetch(`${adapter.url}/replay/takeover`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const takeoverBody = await takeoverRes.json();
+    const stopRes = await fetch(`${adapter.url}/record/stop`, { method: 'POST' });
+    const recorded = await stopRes.json();
+    if (!recorded.events?.some(event => event.button === 'e')) {
+      throw new Error(`Adapter did not return the human key: ${JSON.stringify(recorded)}`);
+    }
+    const healthRes = await fetch(`${backend}/health`);
+    const health = await healthRes.json();
+    if (!healthRes.ok) throw new Error(`health ${healthRes.status}`);
+    const createRes = await fetch(`${backend}/api/v1/profiles`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(profile),
+    });
+    const created = await createRes.json();
+    if (createRes.status !== 201) {
+      throw new Error(`create ${createRes.status} ${JSON.stringify(created)}`);
+    }
+    const gotRes = await fetch(`${backend}/api/v1/profiles/${created.id}`);
+    const got = await gotRes.json();
+    const yours = (got.events || []).filter(event => event.human_override);
+    if (gotRes.status !== 200 || yours.length !== 2 || got.metadata?.custom?.game_id !== 'minecraft') {
+      throw new Error(`Stored profile lost the append: ${JSON.stringify(got)}`);
+    }
+    writeFileSync(join(shotDir, 'create.json'), JSON.stringify(created, null, 2));
+    writeFileSync(join(shotDir, 'get.json'), JSON.stringify(got, null, 2));
+    const proof = {
+      feature: 'author-macro-api',
+      backend,
+      adapterUrl: adapter.url,
+      adapterId: status.id,
+      takeoverStartMs: takeoverBody.start_ms,
+      recordedButtons: recorded.events.map(event => event.button),
+      health,
+      createdId: created.id,
+      storedYours: yours.length,
+      gameId: got.metadata.custom.game_id,
+      target: got.target_app,
+    };
+    writeFileSync(join(shotDir, 'proof.json'), JSON.stringify(proof, null, 2));
+    console.log(JSON.stringify(proof, null, 2));
+  } finally {
+    await adapter.close();
+  }
+}
+
 function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -327,6 +476,10 @@ try {
     await http(rest[0], rest[1], args.body);
   } else if (command === 'drive' && rest[0] === 'manager-controls') {
     await driveManagerControls(Boolean(args.headed));
+  } else if (command === 'drive' && rest[0] === 'author-macro') {
+    await driveAuthorMacro(Boolean(args.headed));
+  } else if (command === 'drive' && rest[0] === 'author-macro-api') {
+    await driveAuthorMacroApi();
   } else if (command === 'screenshot') {
     if (!args.path) throw new Error('--path is required');
     await screenshot(args.path);

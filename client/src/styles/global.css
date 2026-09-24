@@ -209,6 +209,17 @@ body::before {
   gap: 10px;
 }
 
+.game-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.game-row .btn[aria-pressed='true'] {
+  border-color: var(--mint);
+  color: var(--mint);
+}
+
 .field {
   display: grid;
   gap: 6px;

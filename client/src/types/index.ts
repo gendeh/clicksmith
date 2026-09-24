@@ -595,6 +595,9 @@ export const IPC_CHANNELS = {
   OVERLAY_HIDE: 'overlay:hide',
   OVERLAY_TOGGLE: 'overlay:toggle',
 
+  // Games
+  GAMES_LIST: 'games:list',
+
   // Mods
   MODS_LIST: 'mods:list',
   MODS_PROBE: 'mods:probe',
