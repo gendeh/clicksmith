@@ -902,18 +902,76 @@ export class PlaybackEngine extends EventEmitter {
                 .extract({ left, top, width: safeSize, height: safeSize })
                 .png()
                 .toBuffer();
+            const ink = await this.ocrInkCrop(sharp, cropped, safeSize);
+            if (!ink) return null;
             return {
-                image: cropped,
+                image: ink.image,
                 region: {
-                    x: stageRegion.x + left,
-                    y: stageRegion.y + top,
-                    width: safeSize,
-                    height: safeSize,
+                    x: stageRegion.x + left + ink.left,
+                    y: stageRegion.y + top + ink.top,
+                    width: ink.width,
+                    height: ink.height,
                 },
             };
         } catch {
             return null;
         }
+    }
+
+    private async ocrInkCrop(
+        sharp: ReturnType<PlaybackEngine['getSharp']>,
+        image: Buffer,
+        size: number
+    ): Promise<{ image: Buffer; left: number; top: number; width: number; height: number } | null> {
+        const raw = await sharp(image).removeAlpha().raw().toBuffer({ resolveWithObject: true });
+        const channels = raw.info.channels;
+        if (channels < 3) return { image, left: 0, top: 0, width: size, height: size };
+        let minX = raw.info.width;
+        let minY = raw.info.height;
+        let maxX = -1;
+        let maxY = -1;
+        const pixels = raw.data;
+        for (let y = 0; y < raw.info.height; y += 1) {
+            for (let x = 0; x < raw.info.width; x += 1) {
+                const index = (y * raw.info.width + x) * channels;
+                if (pixels[index] >= 200 && pixels[index + 1] >= 200 && pixels[index + 2] >= 200) continue;
+                if (x < minX) minX = x;
+                if (y < minY) minY = y;
+                if (x > maxX) maxX = x;
+                if (y > maxY) maxY = y;
+            }
+        }
+        if (maxX < minX || maxY < minY) return null;
+        const pad = 8;
+        let cropLeft = Math.max(0, minX - pad);
+        let cropTop = Math.max(0, minY - pad);
+        let cropRight = Math.min(raw.info.width, maxX + 1 + pad);
+        let cropBottom = Math.min(raw.info.height, maxY + 1 + pad);
+        if (Math.max(cropRight - cropLeft, cropBottom - cropTop) < 96 && size >= 96) {
+            const need = 96;
+            if (cropRight - cropLeft < need) {
+                const extra = need - (cropRight - cropLeft);
+                cropLeft = Math.max(0, cropLeft - Math.floor(extra / 2));
+                cropRight = Math.min(raw.info.width, cropLeft + need);
+                cropLeft = Math.max(0, cropRight - need);
+            }
+            if (cropBottom - cropTop < need) {
+                const extra = need - (cropBottom - cropTop);
+                cropTop = Math.max(0, cropTop - Math.floor(extra / 2));
+                cropBottom = Math.min(raw.info.height, cropTop + need);
+                cropTop = Math.max(0, cropBottom - need);
+            }
+        }
+        const cropWidth = cropRight - cropLeft;
+        const cropHeight = cropBottom - cropTop;
+        if (cropWidth >= size - 4 && cropHeight >= size - 4) {
+            return { image, left: 0, top: 0, width: size, height: size };
+        }
+        const tightened = await sharp(image)
+            .extract({ left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight })
+            .png()
+            .toBuffer();
+        return { image: tightened, left: cropLeft, top: cropTop, width: cropWidth, height: cropHeight };
     }
 
     private async tryOcrSmartClickFallback(
@@ -945,10 +1003,14 @@ export class PlaybackEngine extends EventEmitter {
                 neighborhood.image
             );
         };
+        if (wideWindow) {
+            const picked = await readNeighborhood();
+            if (picked) return picked;
+        }
         const items = wideWindow
             ? await this.readOcrItems(image, Math.max(timeoutMs, 300), true)
             : await this.readOcrItems(image, timeoutMs);
-        if (!items.length) return wideWindow ? readNeighborhood() : null;
+        if (!items.length) return null;
         const phraseTokens = rawText
             .split(' ')
             .filter(token => token.length >= PlaybackEngine.SMART_CLICK_OCR_MIN_TEXT_LEN);
@@ -1040,7 +1102,7 @@ export class PlaybackEngine extends EventEmitter {
             });
             return best;
         }
-        return wideWindow ? readNeighborhood() : null;
+        return null;
     }
 
     private getScaleShiftEvidence(
