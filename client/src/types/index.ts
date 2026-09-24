@@ -10,12 +10,13 @@
 /**
  * Input event types supported by Clicksmith
  */
-export type InputEventType = 'mouse' | 'keyboard';
+export type InputEventType = 'mouse' | 'keyboard' | 'move' | 'wheel' | 'gamepad';
 
 /**
- * Mouse button types
+ * Pointer buttons. Trackpad taps arrive as these same buttons.
+ * `back` and `forward` are the side buttons (browser back/forward, mouse 4 and 5).
  */
-export type MouseButton = 'left' | 'right' | 'middle';
+export type MouseButton = 'left' | 'right' | 'middle' | 'back' | 'forward';
 
 /**
  * Keyboard modifier keys
@@ -44,8 +45,18 @@ export interface RecordedEvent {
   rel_x: number;
   /** Relative Y coordinate (0-1) within target window */
   rel_y: number;
-  /** Click/key press duration in ms */
+  /** Click/key press duration in ms. Instant samples (move, wheel, axis) use 0. */
   duration_ms: number;
+  /** Horizontal wheel ticks. Positive is right. */
+  wheel_dx?: number;
+  /** Vertical wheel ticks. Positive matches the hook rotation (typically away from the user). */
+  wheel_dy?: number;
+  /** Gamepad index, starting at 0. */
+  pad?: number;
+  /** Gamepad button or axis index. */
+  control?: number;
+  /** Button 0/1 or axis value in [-1, 1]. */
+  value?: number;
   /** Base64 encoded image patch (128x128) around cursor */
   img_patch_b64?: string;
   /** SHA256 hash of image patch for quick comparison */
@@ -162,8 +173,14 @@ export interface RecordingConfig {
   minEventInterval: number;
   /** Record keyboard events */
   recordKeyboard: boolean;
-  /** Record mouse events */
+  /** Record pointer button events */
   recordMouse: boolean;
+  /** Record scroll wheel and trackpad scroll. Omitted means record. */
+  recordWheel?: boolean;
+  /** Record pointer motion. Omitted means record. */
+  recordMotion?: boolean;
+  /** Record gamepad buttons and sticks. Omitted means record. */
+  recordGamepad?: boolean;
   /** Hotkey to stop recording */
   stopHotkey: string;
   /** Hotkey for takeover */
@@ -352,6 +369,9 @@ export interface ImageMatchRequest {
   findAll: boolean;
   /** Maximum matches to return */
   maxMatches: number;
+  /** Scale the template to the current window. 1 means the recorded resolution. */
+  scaleX?: number;
+  scaleY?: number;
 }
 
 /**

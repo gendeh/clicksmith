@@ -20,6 +20,56 @@ const SAMPLE_EVENT = {
   human_override: false,
 };
 
+const MIXED_CAPTURE = [
+  SAMPLE_EVENT,
+  {
+    t_ms: 180,
+    type: 'keyboard' as const,
+    key: 'space',
+    x: 640,
+    y: 420,
+    rel_x: 0.5,
+    rel_y: 0.5,
+    duration_ms: 40,
+    human_override: false,
+  },
+  {
+    t_ms: 200,
+    type: 'move' as const,
+    x: 700,
+    y: 430,
+    rel_x: 0.55,
+    rel_y: 0.52,
+    duration_ms: 0,
+    human_override: false,
+  },
+  {
+    t_ms: 220,
+    type: 'wheel' as const,
+    x: 700,
+    y: 430,
+    rel_x: 0.55,
+    rel_y: 0.52,
+    duration_ms: 0,
+    wheel_dx: 0,
+    wheel_dy: -1,
+    human_override: false,
+  },
+  {
+    t_ms: 260,
+    type: 'gamepad' as const,
+    pad: 0,
+    control: 0,
+    value: 1,
+    x: 700,
+    y: 430,
+    rel_x: 0.55,
+    rel_y: 0.52,
+    duration_ms: 30,
+    human_override: false,
+  },
+];
+
 function nowIso() {
   return new Date().toISOString();
 }
@@ -33,6 +83,9 @@ function defaultPreferences(): UserPreferences {
       minEventInterval: 8,
       recordKeyboard: true,
       recordMouse: true,
+      recordWheel: true,
+      recordMotion: true,
+      recordGamepad: true,
     },
     defaultPlaybackConfig: {
       useImageMatching: true,
@@ -203,7 +256,7 @@ export function installVerifyBridge() {
         case IPC_CHANNELS.RECORDING_STOP: {
           draft = {
             target_app: 'screen',
-            events: [{ ...SAMPLE_EVENT }],
+            events: MIXED_CAPTURE.map(event => ({ ...event })),
             success_metric: { furthest_frame: 0, score: 0 },
             created_at: nowIso(),
           };

@@ -41,6 +41,7 @@ Each feature file starts with an H1 title and one paragraph describing the user-
 Cloud-verifiable:
 
 - [Manager controls](./manager-controls.md) covers record, play, takeover, and target selection in the Profile Manager.
+- [Input kinds](./input-kinds.md) covers the save-run summary for pointer, keyboard, motion, scroll, and gamepad captures.
 - [Profiles](./profiles.md) covers library selection, save-from-draft, and delete.
 - [Settings](./settings.md) covers SmartClick, Geode, and cloud-sync toggles.
 - [EULA gate](./eula-gate.md) covers first-run policy acceptance.

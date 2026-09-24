@@ -1,6 +1,6 @@
 import { EventEmitter } from 'events';
 
-export type HookEventName = 'mousedown' | 'mouseup' | 'mousemove' | 'keydown' | 'keyup';
+export type HookEventName = 'mousedown' | 'mouseup' | 'mousemove' | 'keydown' | 'keyup' | 'wheel';
 
 export interface HookMouseEvent {
   time?: number;
@@ -25,7 +25,20 @@ export interface HookKeyEvent {
   metaKey?: boolean;
 }
 
-export type HookEvent = HookMouseEvent | HookKeyEvent;
+export interface HookWheelEvent {
+  time?: number;
+  x: number;
+  y: number;
+  rotation?: number;
+  direction?: number;
+  amount?: number;
+  altKey?: boolean;
+  ctrlKey?: boolean;
+  shiftKey?: boolean;
+  metaKey?: boolean;
+}
+
+export type HookEvent = HookMouseEvent | HookKeyEvent | HookWheelEvent;
 
 export interface InputHook {
   start: () => void;

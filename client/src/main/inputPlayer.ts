@@ -1,4 +1,5 @@
-type MouseButton = 'left' | 'right' | 'middle';
+import { ROBOT_KEY_NAMES } from '../types/input';
+import type { MouseButton } from '../types';
 
 export class InputPlayer {
     private _robot: any = null;
@@ -31,8 +32,14 @@ export class InputPlayer {
         capslock: 'capslock',
     };
 
-    constructor(robotInstance?: any) {
+    private gamepadOutput: {
+        button: (pad: number, index: number, down: boolean) => boolean;
+        axis: (pad: number, index: number, value: number) => boolean;
+    } | null;
+
+    constructor(robotInstance?: any, gamepadOutput?: InputPlayer['gamepadOutput']) {
         this._robotInstance = robotInstance ?? null;
+        this.gamepadOutput = gamepadOutput ?? null;
     }
 
     private get robot(): any {
@@ -48,11 +55,43 @@ export class InputPlayer {
     }
 
     public mouseDown(button: MouseButton) {
-        this.robot.mouseToggle('down', button);
+        try {
+            this.robot.mouseToggle('down', button);
+            return true;
+        } catch {
+            return false;
+        }
     }
 
     public mouseUp(button: MouseButton) {
-        this.robot.mouseToggle('up', button);
+        try {
+            this.robot.mouseToggle('up', button);
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    public scroll(dx: number, dy: number) {
+        try {
+            if (typeof this.robot.scrollMouse !== 'function') return false;
+            this.robot.scrollMouse(Math.round(dx), Math.round(dy));
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    public gamepadButton(pad: number, index: number, down: boolean) {
+        const output = this.gamepadOutput;
+        if (!output) return false;
+        return output.button(pad, index, down);
+    }
+
+    public gamepadAxis(pad: number, index: number, value: number) {
+        const output = this.gamepadOutput;
+        if (!output) return false;
+        return output.axis(pad, index, value);
     }
 
     public async clickWithDuration(button: MouseButton, durationMs: number) {
@@ -107,6 +146,9 @@ export class InputPlayer {
             return this.keyAliases[lower];
         }
         if (/^f([1-9]|1[0-9]|2[0-4])$/.test(lower)) {
+            return lower;
+        }
+        if (ROBOT_KEY_NAMES.has(lower)) {
             return lower;
         }
         if (lower.length === 1) {

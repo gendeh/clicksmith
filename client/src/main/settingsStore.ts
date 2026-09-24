@@ -9,6 +9,9 @@ const DEFAULT_PREFERENCES: UserPreferences = {
     minEventInterval: 8,
     recordKeyboard: true,
     recordMouse: true,
+    recordWheel: true,
+    recordMotion: true,
+    recordGamepad: true,
   },
   defaultPlaybackConfig: {
     useImageMatching: true,

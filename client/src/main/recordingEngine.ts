@@ -1,20 +1,18 @@
 import { EventEmitter } from 'events';
-import { ModifierKey, MouseButton, RecordingConfig, RecordedEvent, WindowBounds } from '../types';
+import { ModifierKey, RecordingConfig, RecordedEvent, WindowBounds } from '../types';
+import {
+    GAMEPAD_AXIS_DEADZONE,
+    VISUAL_ANCHOR_MIN_DISTANCE_PX,
+    mapHookKey,
+    mapPointerButton,
+    pointerMovedEnough,
+    wheelDeltas,
+} from '../types/input';
 import { capturePatch } from './screenCapture';
 import { computeDHash, computeSha256 } from './imageHash';
-import { createDefaultInputHook, HookEvent, InputHook, HookKeyEvent, HookMouseEvent } from './inputHooks';
+import { GamepadSample, GamepadSource } from './gamepadSource';
+import { createDefaultInputHook, HookEvent, InputHook, HookKeyEvent, HookMouseEvent, HookWheelEvent } from './inputHooks';
 import { WindowManager } from './windowManager';
-
-const KEYCODE_MAP: Record<number, string> = {
-    28: 'enter',
-    57: 'space',
-    14: 'backspace',
-    15: 'tab',
-    42: 'shift',
-    54: 'shift',
-    29: 'control',
-    56: 'alt',
-};
 
 const HOOK_CALIBRATION_MIN_SAMPLES = 8;
 
@@ -64,23 +62,30 @@ export class RecordingEngine extends EventEmitter {
     private isRecording = false;
     private config: RecordingConfig | null = null;
     private events: RecordedEvent[] = [];
-    private lastEventTime = 0;
     private inputHook: InputHook;
     private windowManager: WindowManager;
     private targetBounds: WindowBounds | null = null;
-    private pendingMouseDown = new Map<MouseButton, PendingInput>();
+    private pendingMouseDown = new Map<string, PendingInput>();
     private pendingKeyDown = new Map<number, PendingInput>();
+    private pendingPadDown = new Map<string, PendingInput>();
+    private lastPadAxis = new Map<string, number>();
     private lastMousePosition = { x: 0, y: 0 };
+    private lastMoveSample: { x: number; y: number; t_ms: number } | null = null;
+    private lastAnchor: { x: number; y: number } | null = null;
+    private gamepadSource: GamepadSource | null;
+    private gamepadTimer: NodeJS.Timeout | null = null;
+    private gamepadActive = false;
     private takeoverActive = false;
     private hookTimeBase: number | null = null;
     private hookTimeOffsetMs = 0;
     private recordingStartHrNs: bigint = process.hrtime.bigint();
     private hookTimeCalibrator = new HookTimeCalibrator();
 
-    constructor(options?: { inputHook?: InputHook; windowManager?: WindowManager }) {
+    constructor(options?: { inputHook?: InputHook; windowManager?: WindowManager; gamepadSource?: GamepadSource }) {
         super();
         this.inputHook = options?.inputHook ?? createDefaultInputHook();
         this.windowManager = options?.windowManager ?? new WindowManager();
+        this.gamepadSource = options?.gamepadSource ?? null;
     }
 
     public get recording(): boolean {
@@ -88,6 +93,7 @@ export class RecordingEngine extends EventEmitter {
     }
 
     public dispose() {
+        this.stopGamepadPoll();
         if (this.isRecording) {
             this.isRecording = false;
             this.inputHook.stop();
@@ -128,14 +134,20 @@ export class RecordingEngine extends EventEmitter {
         this.config = config;
         this.isRecording = true;
         this.events = [];
-        this.lastEventTime = Number.NEGATIVE_INFINITY;
         this.hookTimeBase = null;
         this.hookTimeOffsetMs = 0;
         this.recordingStartHrNs = process.hrtime.bigint();
         this.hookTimeCalibrator.reset();
+        this.pendingMouseDown.clear();
+        this.pendingKeyDown.clear();
+        this.pendingPadDown.clear();
+        this.lastPadAxis.clear();
+        this.lastMoveSample = null;
+        this.lastAnchor = null;
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
         this.attachListeners();
         this.inputHook.start();
+        this.startGamepadPoll();
         this.emit('status', { state: 'recording' });
 
         return { success: true };
@@ -146,8 +158,10 @@ export class RecordingEngine extends EventEmitter {
             return { success: false };
         }
 
+        this.pollGamepad();
         this.isRecording = false;
         this.takeoverActive = false;
+        this.stopGamepadPoll();
         this.finalizePendingInputs();
         this.applyHookTiming();
         this.inputHook.stop();
@@ -175,11 +189,10 @@ export class RecordingEngine extends EventEmitter {
 
     public injectMouseDown(event: HookMouseEvent) {
         if (!this.isRecording || !this.config?.recordMouse) return;
-        const button = this.mapMouseButton(event.button);
+        const button = mapPointerButton(event.button);
+        if (!button || this.pendingMouseDown.has(button)) return;
         const hrNow = process.hrtime.bigint();
         const t_ms = this.getEventTimeMs(event, hrNow);
-        if (t_ms - this.lastEventTime < this.config.minEventInterval) return;
-        this.lastEventTime = t_ms;
 
         this.lastMousePosition = { x: event.x, y: event.y };
         const metadata: Record<string, unknown> = { source: 'mouse', action: 'down', injected: true };
@@ -210,31 +223,79 @@ export class RecordingEngine extends EventEmitter {
             event: recordedEvent,
         });
 
-        if (this.config.captureImages) {
-            void this.attachImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
-        }
+        this.anchorEvent(recordedEvent, event.x, event.y, true);
     }
 
     private attachListeners() {
-        this.inputHook.on('mousemove', (event: HookEvent) => {
-            const mouse = event as HookMouseEvent;
-            this.lastMousePosition = { x: mouse.x, y: mouse.y };
-            this.getEventTimeMs(mouse, process.hrtime.bigint());
-        });
-
+        this.inputHook.on('mousemove', (event: HookEvent) => this.handleMouseMove(event as HookMouseEvent));
         this.inputHook.on('mousedown', (event: HookEvent) => this.handleMouseDown(event as HookMouseEvent));
         this.inputHook.on('mouseup', (event: HookEvent) => void this.handleMouseUp(event as HookMouseEvent));
+        this.inputHook.on('wheel', (event: HookEvent) => this.handleWheel(event as HookWheelEvent));
         this.inputHook.on('keydown', (event: HookEvent) => this.handleKeyDown(event as HookKeyEvent));
         this.inputHook.on('keyup', (event: HookEvent) => void this.handleKeyUp(event as HookKeyEvent));
     }
 
-    private handleMouseDown(event: HookMouseEvent) {
-        if (!this.isRecording || !this.config?.recordMouse) return;
-        const button = this.mapMouseButton(event.button);
+    private handleMouseMove(event: HookMouseEvent) {
+        this.lastMousePosition = { x: event.x, y: event.y };
         const hrNow = process.hrtime.bigint();
         const t_ms = this.getEventTimeMs(event, hrNow);
-        if (t_ms - this.lastEventTime < this.config.minEventInterval) return;
-        this.lastEventTime = t_ms;
+        if (!this.isRecording || !this.config || this.config.recordMotion === false) return;
+        const point = { x: event.x, y: event.y };
+        if (!pointerMovedEnough(this.lastMoveSample, point, t_ms - (this.lastMoveSample?.t_ms ?? t_ms), this.config.minEventInterval)) {
+            if (!this.lastMoveSample) this.lastMoveSample = { ...point, t_ms };
+            return;
+        }
+        this.lastMoveSample = { ...point, t_ms };
+        const { rel_x, rel_y } = this.getRelativeCoords(event.x, event.y);
+        const recordedEvent: RecordedEvent = {
+            t_ms,
+            type: 'move',
+            x: event.x,
+            y: event.y,
+            rel_x,
+            rel_y,
+            duration_ms: 0,
+            human_override: this.takeoverActive,
+            modifiers: this.mapModifiers(event),
+            metadata: { source: 'mouse', action: 'move' },
+        };
+        this.events.push(recordedEvent);
+        this.emit('event', recordedEvent);
+        this.anchorEvent(recordedEvent, event.x, event.y, false);
+    }
+
+    private handleWheel(event: HookWheelEvent) {
+        if (!this.isRecording || !this.config || this.config.recordWheel === false) return;
+        const deltas = wheelDeltas(event.direction, event.rotation);
+        if (!deltas) return;
+        const t_ms = this.getEventTimeMs(event);
+        this.lastMousePosition = { x: event.x, y: event.y };
+        const { rel_x, rel_y } = this.getRelativeCoords(event.x, event.y);
+        const recordedEvent: RecordedEvent = {
+            t_ms,
+            type: 'wheel',
+            x: event.x,
+            y: event.y,
+            rel_x,
+            rel_y,
+            duration_ms: 0,
+            wheel_dx: deltas.dx,
+            wheel_dy: deltas.dy,
+            human_override: this.takeoverActive,
+            modifiers: this.mapModifiers(event),
+            metadata: { source: 'mouse', action: 'wheel' },
+        };
+        this.events.push(recordedEvent);
+        this.emit('event', recordedEvent);
+        this.anchorEvent(recordedEvent, event.x, event.y, true);
+    }
+
+    private handleMouseDown(event: HookMouseEvent) {
+        if (!this.isRecording || !this.config?.recordMouse) return;
+        const button = mapPointerButton(event.button);
+        if (!button || this.pendingMouseDown.has(button)) return;
+        const hrNow = process.hrtime.bigint();
+        const t_ms = this.getEventTimeMs(event, hrNow);
 
         const metadata: Record<string, unknown> = { source: 'mouse', action: 'down' };
         if (event.time !== undefined) {
@@ -264,14 +325,13 @@ export class RecordingEngine extends EventEmitter {
             event: recordedEvent,
         });
 
-        if (this.config.captureImages) {
-            void this.attachImageContext(recordedEvent, event.x, event.y, this.config.imagePatchSize);
-        }
+        this.anchorEvent(recordedEvent, event.x, event.y, true);
     }
 
     private async handleMouseUp(event: HookMouseEvent) {
         if (!this.isRecording || !this.config?.recordMouse) return;
-        const button = this.mapMouseButton(event.button);
+        const button = mapPointerButton(event.button);
+        if (!button) return;
         const pending = this.pendingMouseDown.get(button);
         if (pending) {
             const hrNow = process.hrtime.bigint();
@@ -289,8 +349,6 @@ export class RecordingEngine extends EventEmitter {
         }
 
         const t_ms = this.getEventTimeMs(event);
-        if (t_ms - this.lastEventTime < this.config.minEventInterval) return;
-        this.lastEventTime = t_ms;
 
         const metadata: Record<string, unknown> = { source: 'mouse', action: 'up' };
         if (event.time !== undefined) {
@@ -318,11 +376,10 @@ export class RecordingEngine extends EventEmitter {
 
     private handleKeyDown(event: HookKeyEvent) {
         if (!this.isRecording || !this.config?.recordKeyboard) return;
-        const key = this.mapKey(event);
+        if (this.pendingKeyDown.has(event.keycode)) return;
+        const key = mapHookKey(event);
         const hrNow = process.hrtime.bigint();
         const t_ms = this.getEventTimeMs(event, hrNow);
-        if (t_ms - this.lastEventTime < this.config.minEventInterval) return;
-        this.lastEventTime = t_ms;
 
         const metadata: Record<string, unknown> = { source: 'keyboard', action: 'down' };
         if (event.time !== undefined) {
@@ -347,6 +404,7 @@ export class RecordingEngine extends EventEmitter {
 
         this.events.push(recordedEvent);
         this.emit('event', recordedEvent);
+        this.anchorEvent(recordedEvent, this.lastMousePosition.x, this.lastMousePosition.y, true);
         this.pendingKeyDown.set(event.keycode, {
             t_ms,
             hrTimeNs: hrNow,
@@ -373,9 +431,7 @@ export class RecordingEngine extends EventEmitter {
         }
 
         const t_ms = this.getEventTimeMs(event);
-        if (t_ms - this.lastEventTime < this.config.minEventInterval) return;
-        this.lastEventTime = t_ms;
-        const key = this.mapKey(event);
+        const key = mapHookKey(event);
 
         const metadata: Record<string, unknown> = { source: 'keyboard', action: 'up' };
         if (event.time !== undefined) {
@@ -421,28 +477,106 @@ export class RecordingEngine extends EventEmitter {
         }
         this.pendingMouseDown.clear();
         this.pendingKeyDown.clear();
+        for (const pending of this.pendingPadDown.values()) {
+            pending.event.duration_ms = Math.max(0, Number(hrNow - pending.hrTimeNs) / 1_000_000);
+            pending.event.metadata = {
+                ...(pending.event.metadata ?? {}),
+                release_t_ms: nowMs,
+            };
+        }
+        this.pendingPadDown.clear();
     }
 
-    private mapMouseButton(button?: number): MouseButton {
-        switch (button) {
-            case 2:
-                return 'right';
-            case 3:
-                return 'middle';
-            case 1:
-            default:
-                return 'left';
+    private startGamepadPoll() {
+        if (!this.gamepadSource || !this.config || this.config.recordGamepad === false) return;
+        this.gamepadSource.start();
+        this.gamepadActive = true;
+        this.pollGamepad();
+        this.gamepadTimer = setInterval(() => this.pollGamepad(), 16);
+    }
+
+    private stopGamepadPoll() {
+        if (this.gamepadTimer) {
+            clearInterval(this.gamepadTimer);
+            this.gamepadTimer = null;
+        }
+        if (!this.gamepadActive) return;
+        this.gamepadActive = false;
+        this.gamepadSource?.stop();
+    }
+
+    private pollGamepad() {
+        if (!this.isRecording || !this.gamepadSource || this.config?.recordGamepad === false) return;
+        for (const sample of this.gamepadSource.poll()) {
+            this.recordGamepadSample(sample);
         }
     }
 
-    private mapKey(event: HookKeyEvent): string {
-        if (event.keychar && event.keychar > 0) {
-            return String.fromCharCode(event.keychar).toLowerCase();
+    private recordGamepadSample(sample: GamepadSample) {
+        if (!this.isRecording || !this.config) return;
+        const hrNow = process.hrtime.bigint();
+        const t_ms = Number(hrNow - this.recordingStartHrNs) / 1_000_000;
+        const key = `${sample.pad}:${sample.index}`;
+        if (sample.kind === 'axis') {
+            const prev = this.lastPadAxis.get(key) ?? 0;
+            const next = Math.abs(sample.value) < GAMEPAD_AXIS_DEADZONE ? 0 : sample.value;
+            if (Math.abs(next - prev) < 0.04) return;
+            this.lastPadAxis.set(key, next);
+            const { rel_x, rel_y } = this.getRelativeCoords(this.lastMousePosition.x, this.lastMousePosition.y);
+            const recordedEvent: RecordedEvent = {
+                t_ms,
+                type: 'gamepad',
+                pad: sample.pad,
+                control: sample.index,
+                value: next,
+                x: this.lastMousePosition.x,
+                y: this.lastMousePosition.y,
+                rel_x,
+                rel_y,
+                duration_ms: 0,
+                human_override: this.takeoverActive,
+                metadata: { source: 'gamepad', action: 'axis', axis: true },
+            };
+            this.events.push(recordedEvent);
+            this.emit('event', recordedEvent);
+            return;
         }
-        return KEYCODE_MAP[event.keycode] ?? `key_${event.keycode}`;
+
+        if (sample.value >= 0.5) {
+            if (this.pendingPadDown.has(key)) return;
+            const { rel_x, rel_y } = this.getRelativeCoords(this.lastMousePosition.x, this.lastMousePosition.y);
+            const recordedEvent: RecordedEvent = {
+                t_ms,
+                type: 'gamepad',
+                pad: sample.pad,
+                control: sample.index,
+                value: 1,
+                x: this.lastMousePosition.x,
+                y: this.lastMousePosition.y,
+                rel_x,
+                rel_y,
+                duration_ms: 0,
+                human_override: this.takeoverActive,
+                metadata: { source: 'gamepad', action: 'down', axis: false },
+            };
+            this.events.push(recordedEvent);
+            this.emit('event', recordedEvent);
+            this.anchorEvent(recordedEvent, this.lastMousePosition.x, this.lastMousePosition.y, true);
+            this.pendingPadDown.set(key, { t_ms, hrTimeNs: hrNow, event: recordedEvent });
+            return;
+        }
+
+        const pending = this.pendingPadDown.get(key);
+        if (!pending) return;
+        pending.event.duration_ms = Math.max(0, Number(hrNow - pending.hrTimeNs) / 1_000_000);
+        pending.event.metadata = {
+            ...(pending.event.metadata ?? {}),
+            release_t_ms: t_ms,
+        };
+        this.pendingPadDown.delete(key);
     }
 
-    private mapModifiers(event: HookMouseEvent | HookKeyEvent): ModifierKey[] {
+    private mapModifiers(event: HookMouseEvent | HookKeyEvent | HookWheelEvent): ModifierKey[] {
         const mods: ModifierKey[] = [];
         if (event.ctrlKey) mods.push('ctrl');
         if (event.altKey) mods.push('alt');
@@ -460,6 +594,23 @@ export class RecordingEngine extends EventEmitter {
             rel_x: (x - bounds.x) / bounds.width,
             rel_y: (y - bounds.y) / bounds.height,
         };
+    }
+
+    private anchorEvent(event: RecordedEvent, x: number, y: number, always: boolean) {
+        if (!this.config?.captureImages) return;
+        if (!always && this.lastAnchor) {
+            const distance = Math.hypot(x - this.lastAnchor.x, y - this.lastAnchor.y);
+            if (distance < VISUAL_ANCHOR_MIN_DISTANCE_PX) return;
+        }
+        this.lastAnchor = { x, y };
+        const bounds = this.targetBounds;
+        if (bounds && bounds.width > 0 && bounds.height > 0) {
+            event.metadata = {
+                ...(event.metadata ?? {}),
+                anchor_window: { width: bounds.width, height: bounds.height },
+            };
+        }
+        void this.attachImageContext(event, x, y, this.config.imagePatchSize);
     }
 
     private async attachImageContext(event: RecordedEvent, x: number, y: number, size: number) {

@@ -4,6 +4,7 @@ import { ImageService } from '../services/imageService';
 import { InputPlayer } from './inputPlayer';
 import { WindowManager } from './windowManager';
 import { captureRegion, captureScreen } from './screenCapture';
+import { consumedPresses, joinGamePresses, readAnchorWindow, windowScale } from './gameAim';
 
 type Clock = {
     now: () => number;
@@ -11,7 +12,16 @@ type Clock = {
     clearTimeout: (handle: NodeJS.Timeout) => void;
 };
 
-type PlaybackActionType = 'mouseDown' | 'mouseUp' | 'keyDown' | 'keyUp';
+type PlaybackActionType =
+    | 'pointerMove'
+    | 'wheel'
+    | 'mouseDown'
+    | 'mouseUp'
+    | 'keyDown'
+    | 'keyUp'
+    | 'padDown'
+    | 'padUp'
+    | 'padAxis';
 
 type PlaybackAction = {
     t_ms: number;
@@ -37,17 +47,24 @@ export class PlaybackEngine extends EventEmitter {
     private pauseStartedAt: number | null = null;
     private pausedDurationMs = 0;
     private readonly schedulerLookaheadMs = 2;
-    private smartClickResults = new Map<number, { coords: { x: number; y: number }; ready: boolean }>();
+    private smartClickResults = new Map<number, { coords: { x: number; y: number }; ready: boolean; matched: boolean }>();
     private smartClickInFlight = new Set<number>();
-    private smartClickPromises = new Map<number, Promise<{ x: number; y: number }>>();
+    private smartClickPromises = new Map<number, Promise<{ coords: { x: number; y: number }; matched: boolean }>>();
+    private anchorOffset = { x: 0, y: 0 };
+    private joinedPresses = new Map<RecordedEvent, RecordedEvent[]>();
     private static readonly SMART_CLICK_AWAIT_TIMEOUT_MS = 200;
     private actions: PlaybackAction[] = [];
     private dispatchDeltaSamples: number[] = [];
     private readonly overduePolicyByAction: Record<PlaybackActionType, OverduePolicy> = {
+        pointerMove: 'late-dispatch',
+        wheel: 'late-dispatch',
         mouseDown: 'late-dispatch',
         mouseUp: 'late-dispatch',
         keyDown: 'late-dispatch',
         keyUp: 'late-dispatch',
+        padDown: 'late-dispatch',
+        padUp: 'late-dispatch',
+        padAxis: 'late-dispatch',
     };
 
     constructor(options?: {
@@ -90,6 +107,7 @@ export class PlaybackEngine extends EventEmitter {
         this.config = config;
         this.profile = profile;
         this.isPlaying = true;
+        this.joinedPresses = joinGamePresses(profile.events);
         this.actions = this.buildPlaybackActions(profile);
         this.currentActionIndex = 0;
         this.startedAt = this.clock.now();
@@ -97,6 +115,7 @@ export class PlaybackEngine extends EventEmitter {
         this.pausedDurationMs = 0;
         this.smartClickResults.clear();
         this.smartClickInFlight.clear();
+        this.anchorOffset = { x: 0, y: 0 };
         this.dispatchDeltaSamples = [];
         this.targetBounds = this.windowManager.getTargetBounds(config.target);
         this.status = this.createStatus('playing');
@@ -167,7 +186,7 @@ export class PlaybackEngine extends EventEmitter {
         const action = this.actions[index];
         const speed = this.config.speedMultiplier ?? 1;
 
-        if (action.type === 'mouseDown') {
+        if (this.aimsAtScreen(action)) {
             const expected = this.resolveCoords(action.event);
             if (!this.isRapidSequence(index, speed)) {
                 this.prefetchSmartClick(index, action, expected);
@@ -234,10 +253,7 @@ export class PlaybackEngine extends EventEmitter {
                 this.startedAt += overdueMs;
             }
 
-            const coords =
-                action.type === 'mouseDown'
-                    ? await this.getSmartClickCoords(index, this.resolveCoords(action.event))
-                    : null;
+            const coords = this.aimsAtScreen(action) ? await this.placePositional(index, action) : null;
 
             // Capture actualAt AFTER the SmartClick await so the image match
             // wait time does not inflate the timing drift measurement.
@@ -302,19 +318,55 @@ export class PlaybackEngine extends EventEmitter {
             actualAtMs,
         });
 
-        if (action.type === 'mouseDown') {
+        if (action.type === 'pointerMove') {
+            if (coords) this.inputPlayer.moveMouse(coords.x, coords.y);
+        } else if (action.type === 'wheel') {
+            if (coords) this.inputPlayer.moveMouse(coords.x, coords.y);
+            const played = this.inputPlayer.scroll?.(action.event.wheel_dx ?? 0, action.event.wheel_dy ?? 0);
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'scroll_output_unavailable' };
+            }
+        } else if (action.type === 'mouseDown') {
             const button = action.event.btn ?? 'left';
             if (coords) {
                 this.inputPlayer.moveMouse(coords.x, coords.y);
             }
-            this.inputPlayer.mouseDown(button);
+            const played = this.inputPlayer.mouseDown(button);
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'pointer_button_unsupported' };
+            }
+            this.fireJoinedPresses(action.event, true);
         } else if (action.type === 'mouseUp') {
             const button = action.event.btn ?? 'left';
-            this.inputPlayer.mouseUp(button);
+            const played = this.inputPlayer.mouseUp(button);
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'pointer_button_unsupported' };
+            }
+            this.fireJoinedPresses(action.event, false);
         } else if (action.type === 'keyDown') {
+            if (coords) this.inputPlayer.moveMouse(coords.x, coords.y);
             this.playKeyDown(action.event);
         } else if (action.type === 'keyUp') {
             this.playKeyUp(action.event);
+        } else if (action.type === 'padDown' || action.type === 'padUp') {
+            if (action.type === 'padDown' && coords) this.inputPlayer.moveMouse(coords.x, coords.y);
+            const played = this.inputPlayer.gamepadButton?.(
+                action.event.pad ?? 0,
+                action.event.control ?? 0,
+                action.type === 'padDown'
+            );
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'gamepad_output_unavailable' };
+            }
+        } else if (action.type === 'padAxis') {
+            const played = this.inputPlayer.gamepadAxis?.(
+                action.event.pad ?? 0,
+                action.event.control ?? 0,
+                action.event.value ?? 0
+            );
+            if (played === false) {
+                this.status = { ...this.status, lastError: 'gamepad_output_unavailable' };
+            }
         }
 
         this.status = this.updateStatus(this.status, action, eventIndex, scheduledAtMs, actualAtMs);
@@ -331,17 +383,63 @@ export class PlaybackEngine extends EventEmitter {
         };
     }
 
+    private isPositional(type: PlaybackActionType): boolean {
+        return type === 'mouseDown' || type === 'pointerMove' || type === 'wheel';
+    }
+
+    private aimsAtScreen(action: PlaybackAction): boolean {
+        if (this.isPositional(action.type)) return true;
+        if (action.type !== 'keyDown' && action.type !== 'padDown') return false;
+        return Boolean(action.event.img_patch_b64);
+    }
+
+    private fireJoinedPresses(event: RecordedEvent, down: boolean) {
+        const presses = this.joinedPresses.get(event) ?? [];
+        for (const press of presses) {
+            if (press.type === 'keyboard') {
+                if (down) this.playKeyDown(press);
+                else this.playKeyUp(press);
+            } else if (press.type === 'gamepad') {
+                const played = this.inputPlayer.gamepadButton?.(press.pad ?? 0, press.control ?? 0, down);
+                if (played === false) {
+                    this.status = { ...this.status, lastError: 'gamepad_output_unavailable' };
+                }
+            }
+        }
+    }
+
+    private applyAnchor(expected: { x: number; y: number }) {
+        return {
+            x: expected.x + this.anchorOffset.x,
+            y: expected.y + this.anchorOffset.y,
+        };
+    }
+
+    private async placePositional(index: number, action: PlaybackAction) {
+        const expected = this.resolveCoords(action.event);
+        if (!this.config?.useImageMatching || !action.event.img_patch_b64) {
+            return this.applyAnchor(expected);
+        }
+        const placed = await this.getSmartClickCoords(index, expected);
+        if (!placed.matched) return this.applyAnchor(expected);
+        this.anchorOffset = {
+            x: placed.coords.x - expected.x,
+            y: placed.coords.y - expected.y,
+        };
+        return placed.coords;
+    }
+
     private prefetchSmartClick(index: number, action: PlaybackAction, expected: { x: number; y: number }) {
         const config = this.config;
-        if (action.type !== 'mouseDown' || !config?.useImageMatching || !action.event.img_patch_b64) {
+        if (!this.aimsAtScreen(action) || !config?.useImageMatching || !action.event.img_patch_b64) {
             return;
         }
         if (this.smartClickInFlight.has(index) || this.smartClickResults.has(index)) return;
         this.smartClickInFlight.add(index);
         const promise = this.resolveSmartClick(action.event, expected)
-            .then(coords => {
-                this.smartClickResults.set(index, { coords, ready: true });
-                return coords;
+            .then(result => {
+                this.smartClickResults.set(index, { coords: result.coords, ready: true, matched: result.matched });
+                return result;
             })
             .finally(() => {
                 this.smartClickInFlight.delete(index);
@@ -353,34 +451,41 @@ export class PlaybackEngine extends EventEmitter {
     private async getSmartClickCoords(index: number, expected: { x: number; y: number }) {
         const cached = this.smartClickResults.get(index);
         if (cached?.ready) {
-            return cached.coords;
+            return { coords: cached.coords, matched: cached.matched };
         }
 
         const inflight = this.smartClickPromises.get(index);
         if (inflight) {
             try {
-                const coords = await Promise.race([
+                const result = await Promise.race([
                     inflight,
                     new Promise<null>((resolve) =>
                         setTimeout(() => resolve(null), PlaybackEngine.SMART_CLICK_AWAIT_TIMEOUT_MS)
                     ),
                 ]);
-                if (coords) return coords;
+                if (result) return result;
             } catch {
                 // resolve failed; fall back to expected
             }
         }
 
-        return expected;
+        return { coords: expected, matched: false };
     }
 
     private async resolveSmartClick(event: RecordedEvent, expected: { x: number; y: number }) {
         const config = this.config;
+        const missed = { coords: expected, matched: false };
         if (!config?.useImageMatching || !event.img_patch_b64) {
-            return expected;
+            return missed;
         }
 
-        const searchRadius = config.imageSearchRadius ?? 160;
+        const recordedWindow = readAnchorWindow(event);
+        const currentWindow = this.targetBounds;
+        const scale =
+            recordedWindow && currentWindow && currentWindow.width > 0 && currentWindow.height > 0
+                ? windowScale(recordedWindow, currentWindow)
+                : { sx: 1, sy: 1 };
+        const searchRadius = Math.max(8, Math.round((config.imageSearchRadius ?? 160) * Math.max(scale.sx, scale.sy)));
         const region = {
             x: Math.max(0, expected.x - searchRadius),
             y: Math.max(0, expected.y - searchRadius),
@@ -398,6 +503,8 @@ export class PlaybackEngine extends EventEmitter {
                     method: 'hybrid',
                     findAll: false,
                     maxMatches: 1,
+                    scaleX: scale.sx,
+                    scaleY: scale.sy,
                 });
 
                 if (response.success && response.bestMatch && response.bestMatch.confidence >= config.imageMatchThreshold) {
@@ -406,8 +513,11 @@ export class PlaybackEngine extends EventEmitter {
                         successfulMatches: this.status.successfulMatches + 1,
                     };
                     return {
-                        x: region.x + response.bestMatch.x,
-                        y: region.y + response.bestMatch.y,
+                        coords: {
+                            x: region.x + response.bestMatch.x,
+                            y: region.y + response.bestMatch.y,
+                        },
+                        matched: true,
                     };
                 }
 
@@ -415,13 +525,13 @@ export class PlaybackEngine extends EventEmitter {
                     const errorText = response.error.toLowerCase();
                     if (errorText.includes('econnrefused') || errorText.includes('fetch failed')) {
                         this.status = { ...this.status };
-                        return expected;
+                        return missed;
                     }
                 }
             } catch (error: any) {
                 const text = String(error?.message ?? '').toLowerCase();
                 if (text.includes('econnrefused') || text.includes('fetch failed')) {
-                    return expected;
+                    return missed;
                 }
                 this.status = { ...this.status, lastError: 'image_match_failed' };
             }
@@ -442,6 +552,8 @@ export class PlaybackEngine extends EventEmitter {
                 method: 'hybrid',
                 findAll: false,
                 maxMatches: 1,
+                scaleX: scale.sx,
+                scaleY: scale.sy,
             });
             if (response.success && response.bestMatch && response.bestMatch.confidence >= config.imageMatchThreshold) {
                 this.status = {
@@ -449,8 +561,11 @@ export class PlaybackEngine extends EventEmitter {
                     successfulMatches: this.status.successfulMatches + 1,
                 };
                 return {
-                    x: response.bestMatch.x,
-                    y: response.bestMatch.y,
+                    coords: {
+                        x: response.bestMatch.x,
+                        y: response.bestMatch.y,
+                    },
+                    matched: true,
                 };
             }
         } catch {
@@ -458,7 +573,7 @@ export class PlaybackEngine extends EventEmitter {
         }
 
         this.status = { ...this.status, failedMatches: this.status.failedMatches + 1 };
-        return expected;
+        return missed;
     }
 
     private playKeyDown(event: RecordedEvent) {
@@ -495,12 +610,34 @@ export class PlaybackEngine extends EventEmitter {
         };
         const actions: PlaybackAction[] = [];
 
+        const consumed = consumedPresses(this.joinedPresses);
         profile.events.forEach((event, index) => {
             const metadata = event.metadata as Record<string, unknown> | undefined;
-            if (metadata?.takeover_marker) return;
+            if (metadata?.takeover_marker || consumed.has(event)) return;
             const jitter = adjustments?.[index] ?? 0;
 
-            if (event.type === 'mouse') {
+            if (event.type === 'move') {
+                actions.push({ t_ms: snapTime(Math.max(0, event.t_ms + jitter)), type: 'pointerMove', event });
+            } else if (event.type === 'wheel') {
+                actions.push({ t_ms: snapTime(Math.max(0, event.t_ms + jitter)), type: 'wheel', event });
+            } else if (event.type === 'gamepad') {
+                const axis = metadata?.axis === true || metadata?.action === 'axis';
+                if (axis) {
+                    actions.push({ t_ms: snapTime(Math.max(0, event.t_ms + jitter)), type: 'padAxis', event });
+                } else {
+                    const { pressTime, releaseTime } = this.getPressReleaseTimes(event);
+                    if (releaseTime !== null) {
+                        const rawPress = Math.max(0, pressTime + jitter);
+                        const rawRelease = Math.max(rawPress, releaseTime + jitter);
+                        actions.push({ t_ms: snapTime(rawPress), type: 'padDown', event });
+                        actions.push({ t_ms: snapTime(Math.max(snapTime(rawPress), rawRelease)), type: 'padUp', event });
+                    } else {
+                        const time = snapTime(Math.max(0, event.t_ms + jitter));
+                        actions.push({ t_ms: time, type: 'padDown', event });
+                        actions.push({ t_ms: time, type: 'padUp', event });
+                    }
+                }
+            } else if (event.type === 'mouse') {
                 const { pressTime, releaseTime } = this.getPressReleaseTimes(event);
                 if (releaseTime !== null) {
                     const rawPress = Math.max(0, pressTime + jitter);
@@ -608,16 +745,26 @@ export class PlaybackEngine extends EventEmitter {
 
     private actionOrder(type: PlaybackActionType): number {
         switch (type) {
-            case 'mouseDown':
+            case 'pointerMove':
                 return 0;
-            case 'keyDown':
+            case 'wheel':
                 return 1;
-            case 'mouseUp':
+            case 'padAxis':
                 return 2;
-            case 'keyUp':
+            case 'mouseDown':
                 return 3;
-            default:
+            case 'keyDown':
                 return 4;
+            case 'padDown':
+                return 5;
+            case 'mouseUp':
+                return 6;
+            case 'keyUp':
+                return 7;
+            case 'padUp':
+                return 8;
+            default:
+                return 9;
         }
     }
 

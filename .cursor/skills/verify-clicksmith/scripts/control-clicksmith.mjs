@@ -20,6 +20,7 @@ Commands:
   cleanup
   http GET|POST|PUT|DELETE <url> [--body JSON]
   drive manager-controls [--headed]
+  drive input-kinds [--headed]
   screenshot --path <file>
 `);
 }
@@ -243,6 +244,40 @@ async function screenshot(pathArg) {
   console.log(JSON.stringify({ ok: true, path: pathArg }));
 }
 
+async function driveInputKinds(headed) {
+  const { chromium } = await import('playwright');
+  const state = readState();
+  const shotDir = join(artifactsRoot, 'input-kinds');
+  mkdirSync(shotDir, { recursive: true });
+  const browser = await chromium.launch({ headless: !headed });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+  await page.goto(state.urls.renderer, { waitUntil: 'domcontentloaded' });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15000 });
+  await page.locator('[data-testid="btn-record"]').click();
+  await page.waitForFunction(() => document.querySelector('[data-testid="chip-rec"]')?.textContent?.toLowerCase().includes('live'));
+  await page.screenshot({ path: join(shotDir, 'recording.png'), fullPage: true });
+  await page.locator('[data-testid="btn-record"]').click();
+  await page.locator('[data-testid="save-run-modal"]').waitFor();
+  const kinds = await page.locator('[data-testid="save-run-kinds"]').innerText();
+  const expected = '1 pointer click, 1 key, 1 pointer move, 1 scroll, 1 gamepad input';
+  if (kinds !== expected) {
+    throw new Error(`Expected captured kinds ${JSON.stringify(expected)}, got ${JSON.stringify(kinds)}`);
+  }
+  await page.screenshot({ path: join(shotDir, 'kinds.png'), fullPage: true });
+  await page.locator('[data-testid="save-run-discard"]').click();
+  await page.locator('[data-testid="save-run-modal"]').waitFor({ state: 'detached' });
+  const proof = {
+    feature: 'input-kinds',
+    entry: 'manager-save-summary',
+    url: state.urls.renderer,
+    kinds,
+    artifacts: [join(shotDir, 'recording.png'), join(shotDir, 'kinds.png')],
+  };
+  writeFileSync(join(shotDir, 'proof.json'), JSON.stringify(proof, null, 2));
+  await browser.close();
+  console.log(JSON.stringify(proof, null, 2));
+}
+
 async function driveManagerControls(headed) {
   const { chromium } = await import('playwright');
   const state = readState();
@@ -327,6 +362,8 @@ try {
     await http(rest[0], rest[1], args.body);
   } else if (command === 'drive' && rest[0] === 'manager-controls') {
     await driveManagerControls(Boolean(args.headed));
+  } else if (command === 'drive' && rest[0] === 'input-kinds') {
+    await driveInputKinds(Boolean(args.headed));
   } else if (command === 'screenshot') {
     if (!args.path) throw new Error('--path is required');
     await screenshot(args.path);
