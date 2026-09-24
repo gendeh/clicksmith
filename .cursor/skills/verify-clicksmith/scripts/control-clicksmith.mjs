@@ -20,6 +20,7 @@ Commands:
   cleanup
   http GET|POST|PUT|DELETE <url> [--body JSON]
   drive manager-controls [--headed]
+  drive author-macro [--headed]
   screenshot --path <file>
 `);
 }
@@ -293,6 +294,63 @@ async function driveManagerControls(headed) {
   console.log(JSON.stringify(proof, null, 2));
 }
 
+async function driveAuthorMacro(headed) {
+  const { chromium } = await import('playwright');
+  const state = readState();
+  mkdirSync(artifactsRoot, { recursive: true });
+  const shotDir = join(artifactsRoot, 'author-macro');
+  mkdirSync(shotDir, { recursive: true });
+  const browser = await chromium.launch({ headless: !headed });
+  const page = await browser.newPage({ viewport: { width: 1280, height: 840 } });
+  await page.goto(state.urls.renderer, { waitUntil: 'domcontentloaded' });
+  await page.locator('[data-testid="app-shell"]').waitFor({ timeout: 15000 });
+  await page.locator('[data-testid="select-target"] option', { hasText: 'Minecraft' }).waitFor({ state: 'attached' });
+  await page.locator('[data-testid="game-minecraft"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="chip-target"]')?.textContent?.includes('Minecraft')
+  );
+  await page.locator('[data-testid="btn-play"]').click();
+  await page.waitForFunction(() =>
+    document.querySelector('[data-testid="chip-play"]')?.textContent?.toLowerCase().includes('running')
+  );
+  await page.screenshot({ path: join(shotDir, 'playing.png'), fullPage: true });
+  await page.locator('[data-testid="btn-takeover"]').click();
+  const summary = page.locator('[data-testid="takeover-summary"]');
+  await summary.waitFor();
+  const summaryText = await summary.innerText();
+  if (!summaryText.toLowerCase().includes('appended')) {
+    throw new Error(`Expected takeover summary to describe appended input, got ${JSON.stringify(summaryText)}`);
+  }
+  await page.screenshot({ path: join(shotDir, 'appended.png'), fullPage: true });
+  await page.locator('[data-testid="save-run-name"]').fill('Minecraft wheel grab');
+  await page.locator('[data-testid="save-run-confirm"]').click();
+  await page.locator('[data-testid="save-run-modal"]').waitFor({ state: 'detached' });
+  const savedCard = page.locator('[data-testid^="profile-card-"]', { hasText: 'Minecraft wheel grab' });
+  await savedCard.waitFor();
+  const savedText = await savedCard.innerText();
+  if (!savedText.toLowerCase().includes('yours')) {
+    throw new Error(`Saved profile did not keep the human segment, got ${JSON.stringify(savedText)}`);
+  }
+  await page.screenshot({ path: join(shotDir, 'saved.png'), fullPage: true });
+  const proof = {
+    feature: 'author-macro',
+    url: state.urls.renderer,
+    game: await page.locator('[data-testid="game-match"]').innerText(),
+    target: await page.locator('[data-testid="chip-target"]').innerText(),
+    takeoverSummary: summaryText,
+    savedProfile: savedText.split('\n')[0],
+    savedDetail: savedText,
+    artifacts: [
+      join(shotDir, 'playing.png'),
+      join(shotDir, 'appended.png'),
+      join(shotDir, 'saved.png'),
+    ],
+  };
+  writeFileSync(join(shotDir, 'proof.json'), JSON.stringify(proof, null, 2));
+  await browser.close();
+  console.log(JSON.stringify(proof, null, 2));
+}
+
 function parseArgs(argv) {
   const args = { _: [] };
   for (let i = 0; i < argv.length; i += 1) {
@@ -327,6 +385,8 @@ try {
     await http(rest[0], rest[1], args.body);
   } else if (command === 'drive' && rest[0] === 'manager-controls') {
     await driveManagerControls(Boolean(args.headed));
+  } else if (command === 'drive' && rest[0] === 'author-macro') {
+    await driveAuthorMacro(Boolean(args.headed));
   } else if (command === 'screenshot') {
     if (!args.path) throw new Error('--path is required');
     await screenshot(args.path);

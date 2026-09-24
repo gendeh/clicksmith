@@ -23,7 +23,9 @@ import { ModManager } from './modManager';
 import { createDefaultInputHook, HookEvent, HookMouseEvent, InputHook } from './inputHooks';
 import { RunLifecycleEventType, RunLifecycleManager } from './runLifecycle';
 import { RunTraceLogger } from './runTrace';
-import { mergeTakeoverEvents } from './takeoverMerge';
+import { mergeTakeoverEvents } from '../domain/takeoverAppend';
+import { adapterIdForTarget, matchGame } from '../domain/gameCatalog';
+import { loadGameCatalog } from './gameCatalogStore';
 import { isReplayLive, isReplaySignalActive, ModStatusResponse, validateModStatusPayload } from './modProtocol';
 
 let mainWindow: BrowserWindow | null = null;
@@ -36,7 +38,6 @@ const windowManager = new WindowManager();
 const recordingEngine = new RecordingEngine({ windowManager });
 const playbackEngine = new PlaybackEngine({ windowManager });
 const modManager = new ModManager();
-const MOD_ADAPTER_ID = 'geode-geometry-dash';
 const runLifecycle = new RunLifecycleManager();
 const runTrace = new RunTraceLogger();
 
@@ -48,6 +49,7 @@ let lastPlaybackLeadInMs = 0;
 let lastDraftProfile: Profile | null = null;
 let draftQuickReplayPending = false;
 let recordingViaMod = false;
+let activeAdapterId: string | null = null;
 let playbackViaMod = false;
 let activeModBaseUrl: string | null = null;
 let pendingTakeoverProfile: Profile | null = null;
@@ -586,8 +588,13 @@ async function fetchJsonWithTimeout(url: string, init: RequestInit, timeoutMs: n
   }
 }
 
-async function resolveModBaseUrl(): Promise<string | null> {
-  const status = await modManager.probeAdapter(MOD_ADAPTER_ID);
+function adapterForRun(target: string | null | undefined, useModAdapter: boolean): string | null {
+  return adapterIdForTarget(loadGameCatalog(), target, useModAdapter);
+}
+
+async function probeAdapterBaseUrl(adapterId: string | null): Promise<string | null> {
+  if (!adapterId) return null;
+  const status = await modManager.probeAdapter(adapterId);
   if (!status || status.connection !== 'connected') return null;
   const protocol = status.adapter.protocol;
   if (protocol?.baseUrl) return protocol.baseUrl;
@@ -595,6 +602,15 @@ async function resolveModBaseUrl(): Promise<string | null> {
     return protocol.statusUrl.replace(/\/status\/?$/, '');
   }
   return null;
+}
+
+async function resolveModBaseUrl(target?: string | null): Promise<string | null> {
+  const preferences = settingsStore.getPreferences();
+  const resolved =
+    target ?? currentRecordingTarget ?? lastPlaybackProfile?.target_app ?? lastPlaybackTarget ?? null;
+  const adapterId = adapterForRun(resolved, preferences.useModAdapter);
+  if (adapterId) activeAdapterId = adapterId;
+  return probeAdapterBaseUrl(adapterId);
 }
 
 async function modRequest<T>(baseUrl: string, path: string, body?: Record<string, unknown>): Promise<T> {
@@ -685,8 +701,20 @@ async function resolveModRecordingState(): Promise<{ baseUrl: string; status: Mo
   return { baseUrl, status };
 }
 
-async function isModAdapterReachable(): Promise<boolean> {
-  return (await resolveModBaseUrl()) !== null;
+async function isModAdapterReachable(target?: string | null): Promise<boolean> {
+  return (await resolveModBaseUrl(target)) !== null;
+}
+
+function authoringCustom(
+  target: string | null | undefined,
+  extra: Record<string, string | number> = {}
+): Record<string, string | number> {
+  const game = target ? matchGame(loadGameCatalog(), target) : undefined;
+  return {
+    ...(game ? { game_id: game.id } : {}),
+    ...(activeAdapterId ? { mod_adapter: activeAdapterId } : {}),
+    ...extra,
+  };
 }
 
 function modButtonToKey(button: string): string {
@@ -934,11 +962,6 @@ function shouldAutoTakeover(): boolean {
   return preferences.autoTakeoverOnInput ?? true;
 }
 
-function isGeometryDashTarget(target: string | null | undefined): boolean {
-  if (!target) return false;
-  return target.toLowerCase().includes('geometry dash');
-}
-
 function disarmAutoTakeoverHook() {
   if (!autoTakeoverHookActive) return;
   autoTakeoverHookActive = false;
@@ -969,7 +992,7 @@ function armAutoTakeoverHook() {
 }
 
 async function startModRecording(target: string): Promise<{ success: boolean; error?: string }> {
-  const baseUrl = await resolveModBaseUrl();
+  const baseUrl = await resolveModBaseUrl(target);
   if (!baseUrl) return { success: false, error: 'mod_unreachable' };
   clearPendingDraftState();
   clearModPlaybackAutoIdleTimer();
@@ -1064,14 +1087,13 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
       event_count: events.length,
       override_count: events.filter(event => event.human_override).length,
       tags: [],
-      custom: {
-        mod_adapter: MOD_ADAPTER_ID,
-        mod_tick_hz: response.tick_hz ?? 240,
+      custom: authoringCustom(currentRecordingTarget ?? baseProfile?.target_app, {
+        ...(typeof response.tick_hz === 'number' ? { mod_tick_hz: response.tick_hz } : { mod_tick_hz: 240 }),
         ...(typeof normalizedTakeoverStartMs === 'number'
           ? { takeover_start_ms: normalizedTakeoverStartMs }
           : {}),
         ...(typeof takeoverBaseId === 'string' ? { takeover_base_profile_id: takeoverBaseId } : {}),
-      },
+      }),
     },
   });
   currentRecordingTarget = null;
@@ -1096,7 +1118,7 @@ async function stopModRecordingAndDraft(): Promise<{ success: boolean; profile?:
 }
 
 async function armModTakeover(profile: Profile): Promise<{ success: boolean; error?: string }> {
-  const baseUrl = await resolveModBaseUrl();
+  const baseUrl = await resolveModBaseUrl(profile.target_app);
   if (!baseUrl) {
     return { success: false, error: 'mod_unreachable' };
   }
@@ -1118,7 +1140,7 @@ async function armModTakeover(profile: Profile): Promise<{ success: boolean; err
 }
 
 async function startModPlayback(profile: Profile): Promise<{ success: boolean; error?: string; eventCount?: number }> {
-  const baseUrl = await resolveModBaseUrl();
+  const baseUrl = await resolveModBaseUrl(profile.target_app);
   if (!baseUrl) {
     broadcastStatus(IPC_CHANNELS.PLAYBACK_STATUS, buildModPlaybackStatus('idle', 0, 'mod_unreachable'));
     return { success: false, error: 'mod_unreachable' };
@@ -1184,12 +1206,12 @@ async function stopModPlayback(): Promise<{ success: boolean; error?: string }> 
 }
 
 async function startModTakeoverImmediate(): Promise<{ success: boolean; error?: string }> {
-  const baseUrl = await resolveModBaseUrl();
-  if (!baseUrl) {
-    return { success: false, error: 'mod_unreachable' };
-  }
   if (!lastPlaybackProfile) {
     return { success: false, error: 'no_playback_profile' };
+  }
+  const baseUrl = await resolveModBaseUrl(lastPlaybackProfile.target_app);
+  if (!baseUrl) {
+    return { success: false, error: 'mod_unreachable' };
   }
   pendingTakeoverProfile = lastPlaybackProfile;
   pendingTakeoverStartMs = null;
@@ -1230,6 +1252,7 @@ async function startLocalTakeover(triggerEvent?: HookMouseEvent): Promise<{ succ
   }
   pendingTakeoverProfile = lastPlaybackProfile;
   pendingTakeoverStartMs = Math.max(0, playbackEngine.getElapsedMs() + lastPlaybackLeadInMs);
+  activeAdapterId = null;
   const target = lastPlaybackTarget ?? lastPlaybackProfile.target_app ?? 'screen';
   currentRecordingTarget = target;
   disarmAutoTakeoverHook();
@@ -1260,11 +1283,14 @@ async function stopRecordingAndDraft() {
         events
       );
     }
+    const takeoverStartMs = pendingTakeoverStartMs;
+    const takeoverBaseId = pendingTakeoverProfile?.id ?? null;
+    const draftTarget = currentRecordingTarget ?? pendingTakeoverProfile?.target_app ?? 'screen';
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
     const totalDurationMs = computeProfileDuration(events);
     profileStore.saveDraft({
-      target_app: currentRecordingTarget ?? 'screen',
+      target_app: draftTarget,
       events,
       success_metric: buildSuccessMetric(),
       created_at: createdAt,
@@ -1276,6 +1302,10 @@ async function stopRecordingAndDraft() {
         event_count: events.length,
         override_count: events.filter((event: Profile['events'][0]) => event.human_override).length,
         tags: [],
+        custom: authoringCustom(draftTarget, {
+          ...(typeof takeoverStartMs === 'number' ? { takeover_start_ms: takeoverStartMs } : {}),
+          ...(typeof takeoverBaseId === 'string' ? { takeover_base_profile_id: takeoverBaseId } : {}),
+        }),
       },
     });
     lastDraftProfile = buildDraftPlaybackProfile();
@@ -1321,6 +1351,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function isNoPayload(value: unknown): value is NoPayload {
   return value === undefined || value === null;
+}
+
+function isTakeoverPayload(value: unknown): value is { target?: string } | null | undefined {
+  if (value === undefined || value === null) return true;
+  if (!isRecord(value)) return false;
+  return value.target === undefined || typeof value.target === 'string';
 }
 
 function isString(value: unknown): value is string {
@@ -1444,10 +1480,8 @@ function setupIpcHandlers() {
     const normalized = buildRecordingConfig(config);
     clearPendingDraftState();
     currentRecordingTarget = normalized.target;
-    const preferences = settingsStore.getPreferences();
-    const adapterReachable = await isModAdapterReachable();
-    const useModAdapterForThisRun =
-      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(normalized.target));
+    const useModAdapterForThisRun = await isModAdapterReachable(normalized.target);
+    if (!useModAdapterForThisRun) activeAdapterId = null;
     recordingEngine.setTakeoverActive(false);
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
@@ -1510,10 +1544,8 @@ function setupIpcHandlers() {
     pendingTakeoverProfile = null;
     pendingTakeoverStartMs = null;
     lastPlaybackLeadInMs = 0;
-    const preferences = settingsStore.getPreferences();
-    const adapterReachable = await isModAdapterReachable();
-    const useModAdapterForThisRun =
-      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(profile.target_app));
+    const useModAdapterForThisRun = await isModAdapterReachable(profile.target_app);
+    if (!useModAdapterForThisRun) activeAdapterId = null;
     if (useModAdapterForThisRun) {
       try {
         const modResult = await startModPlayback(profile);
@@ -1570,7 +1602,11 @@ function setupIpcHandlers() {
     return { success: true };
   });
 
-  registerValidatedHandle(IPC_CHANNELS.PLAYBACK_TAKEOVER, isNoPayload, async () => {
+  registerValidatedHandle(IPC_CHANNELS.PLAYBACK_TAKEOVER, isTakeoverPayload, async payload => {
+    if (payload && typeof payload.target === 'string' && payload.target.trim() !== '') {
+      currentRecordingTarget = payload.target;
+      lastPlaybackTarget = payload.target;
+    }
     return triggerTakeover();
   });
 
@@ -1712,6 +1748,8 @@ function setupIpcHandlers() {
     }
   });
 
+  registerValidatedHandle(IPC_CHANNELS.GAMES_LIST, isNoPayload, async () => loadGameCatalog());
+
   registerValidatedHandle(IPC_CHANNELS.MODS_LIST, isNoPayload, async () => modManager.listAdapters());
 
   registerValidatedHandle(IPC_CHANNELS.MODS_PROBE, isIdPayload, async payload => {
@@ -1766,7 +1804,6 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
   globalShortcut.unregisterAll();
 
   globalShortcut.register(hotkeys.toggleRecording, async () => {
-    const preferences = settingsStore.getPreferences();
     const modState = await resolveModRecordingState();
     const shouldStopMod =
       recordingViaMod || modTakeoverArmed || (modState ? isModRecordingLifecycleActive(modState.status) : false);
@@ -1790,8 +1827,9 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       return;
     }
 
-    const adapterReachable = await isModAdapterReachable();
-    const useModAdapterForThisRun = adapterReachable && preferences.useModAdapter;
+    currentRecordingTarget = 'screen';
+    const useModAdapterForThisRun = await isModAdapterReachable('screen');
+    if (!useModAdapterForThisRun) activeAdapterId = null;
     clearPendingDraftState();
     if (useModAdapterForThisRun) {
       const result = await startModRecording('screen').catch(() => null);
@@ -1800,7 +1838,6 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       return;
     }
 
-    currentRecordingTarget = 'screen';
     await recordingEngine.start(buildRecordingConfig({ target: 'screen' }));
     applyLifecycle('arm_record', 'local_record_start_hotkey');
     applyLifecycle('attempt_boundary', 'local_record_live_hotkey');
@@ -1810,8 +1847,6 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
   });
 
   globalShortcut.register(hotkeys.togglePlayback, async () => {
-    const preferences = settingsStore.getPreferences();
-    const adapterReachable = await isModAdapterReachable();
     if (playbackViaMod && activeModBaseUrl) {
       const status = await modGetStatus(activeModBaseUrl);
       const adapterReplayBusy = Boolean(
@@ -1837,8 +1872,8 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
       draftQuickReplayPending = false;
       lastPlaybackProfile = draftProfile;
       lastPlaybackTarget = draftProfile.target_app;
-      const useModAdapterForThisRun =
-        adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(draftProfile.target_app));
+      const useModAdapterForThisRun = await isModAdapterReachable(draftProfile.target_app);
+      if (!useModAdapterForThisRun) activeAdapterId = null;
       if (useModAdapterForThisRun) {
         const modResult = await startModPlayback(draftProfile).catch((error: any) => ({
           success: false,
@@ -1880,8 +1915,8 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     const profile = profileStore.get(profileId);
     if (!profile) return;
     lastPlaybackProfile = profile;
-    const useModAdapterForThisRun =
-      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(profile.target_app));
+    const useModAdapterForThisRun = await isModAdapterReachable(profile.target_app);
+    if (!useModAdapterForThisRun) activeAdapterId = null;
     if (useModAdapterForThisRun) {
       const modResult = await startModPlayback(profile).catch((error: any) => ({
         success: false,
@@ -1937,10 +1972,8 @@ function registerGlobalHotkeys(hotkeys = DEFAULT_HOTKEYS) {
     const profile = profileStore.get(profileId);
     if (!profile) return;
     lastPlaybackProfile = profile;
-    const preferences = settingsStore.getPreferences();
-    const adapterReachable = await isModAdapterReachable();
-    const useModAdapterForThisRun =
-      adapterReachable && (preferences.useModAdapter || isGeometryDashTarget(profile.target_app));
+    const useModAdapterForThisRun = await isModAdapterReachable(profile.target_app);
+    if (!useModAdapterForThisRun) activeAdapterId = null;
     if (useModAdapterForThisRun) {
       const modResult = await startModPlayback(profile).catch((error: any) => ({
         success: false,

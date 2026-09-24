@@ -86,7 +86,7 @@ The project-local skill is `.cursor/skills/verify-clicksmith/`. It is committed 
 
 The map is `.cursor/skills/verify-clicksmith/features/`. Each file is user-POV: how to get there, how to drive it, what proof looks like, what will waste a run.
 
-The driver is `node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs`. It launches isolated ports, doctors, drives `manager-controls`, and writes artifacts that survive cleanup.
+The driver is `node .cursor/skills/verify-clicksmith/scripts/control-clicksmith.mjs`. It launches isolated ports, doctors, drives `manager-controls` and `author-macro`, and writes artifacts that survive cleanup. `node scripts/repro-takeover.mjs` replays the takeover append, including a heap snapshot with `--heap`.
 
 The verify renderer is the real React app with an in-page IPC bridge (`client/src/renderer/verifyBridge.ts`) used only when Electron preload is absent. That is how Cloud Agents click Record without `uiohook`. It proves the UI contract. It does not prove native injection. The map says so.
 

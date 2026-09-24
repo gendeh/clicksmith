@@ -23,6 +23,9 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     strictPort: true,
+    fs: {
+      allow: [path.resolve(__dirname, '..'), path.resolve(__dirname)],
+    },
   },
   build: {
     outDir: 'dist/renderer',

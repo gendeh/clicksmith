@@ -1,5 +1,7 @@
 # Adapter Manifest Format
 
+Games live in `games/catalog.json`. This file is only the optional mod transport. A game omits `adapterId` when the OS recorder is the whole path.
+
 The mod registry is a JSON file that lists adapters Clicksmith can surface in the UI.
 
 File: `mods/registry.json`
