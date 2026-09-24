@@ -59,7 +59,7 @@ describe('gaming SmartClick', () => {
       keyDown: (key: string) => calls.push(['key', key]),
       keyUp: (key: string) => calls.push(['keyUp', key]),
       scroll: () => undefined,
-      gamepadButton: () => true,
+      gamepadButton: (pad: number, index: number, down: boolean) => calls.push(['pad', pad, index, down]),
       gamepadAxis: () => true,
     };
     const place = {
@@ -91,6 +91,32 @@ describe('gaming SmartClick', () => {
       human_override: false,
       metadata: { action: 'down', release_t_ms: 30 },
     };
+    const fire: RecordedEvent = {
+      t_ms: 18,
+      type: 'gamepad',
+      pad: 0,
+      control: 1,
+      value: 1,
+      x: 100,
+      y: 100,
+      rel_x: 0.5,
+      rel_y: 0.5,
+      duration_ms: 12,
+      human_override: false,
+      metadata: { action: 'down', release_t_ms: 30 },
+    };
+    const later: RecordedEvent = {
+      t_ms: 200,
+      type: 'keyboard',
+      key: 'e',
+      x: 40,
+      y: 40,
+      rel_x: 0.2,
+      rel_y: 0.2,
+      duration_ms: 10,
+      human_override: false,
+      metadata: { action: 'down', release_t_ms: 210 },
+    };
     const profile: Profile = {
       id: 'aim',
       name: 'Aim',
@@ -99,7 +125,7 @@ describe('gaming SmartClick', () => {
       version: 1,
       notes: '',
       success_metric: { furthest_frame: 0, score: 0 },
-      events: [place, jump],
+      events: [place, jump, fire, later],
     };
     const config: PlaybackConfig = {
       profileId: 'aim',
@@ -117,7 +143,7 @@ describe('gaming SmartClick', () => {
     const playback = new PlaybackEngine({
       inputPlayer: player as any,
       imageService: { matchImage } as any,
-      windowManager: { getTargetBounds: () => ({ x: 0, y: 0, width: 100, height: 100 }) } as any,
+      windowManager: { getTargetBounds: () => ({ x: 200, y: 100, width: 100, height: 100 }) } as any,
     });
 
     const finished = new Promise(resolve => playback.once('complete', resolve));
@@ -127,11 +153,15 @@ describe('gaming SmartClick', () => {
     expect(matchImage).toHaveBeenCalledTimes(1);
     expect(matchImage).toHaveBeenCalledWith(expect.objectContaining({ scaleX: 0.5, scaleY: 0.5 }));
     expect(calls).toEqual([
-      ['move', 15, 25],
+      ['move', 185, 95],
       ['down', 'left'],
       ['key', 'space'],
+      ['pad', 0, 1, true],
       ['up', 'left'],
       ['keyUp', 'space'],
+      ['pad', 0, 1, false],
+      ['key', 'e'],
+      ['keyUp', 'e'],
     ]);
   });
 });
