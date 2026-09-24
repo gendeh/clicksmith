@@ -90,6 +90,10 @@ export class ImageService {
     const budget = Math.max(0, Math.min(3000, request.timeoutMs ?? 900));
     const serverBudgetMs = Math.max(0, budget - elapsed);
     const fittedRequest: ImageOcrRequest = { ...request, image: fitted.image, timeoutMs: serverBudgetMs };
+    if (fitted.coordinateScale !== 1 && request.focusX !== undefined && request.focusY !== undefined) {
+      fittedRequest.focusX = request.focusX / fitted.coordinateScale;
+      fittedRequest.focusY = request.focusY / fitted.coordinateScale;
+    }
     const controller = new AbortController();
     const abortMs = serverBudgetMs === 0 ? 0 : serverBudgetMs + OCR_RESPONSE_GRACE_MS;
     const timeout = setTimeout(() => controller.abort(), abortMs);

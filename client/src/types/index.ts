@@ -458,6 +458,11 @@ export interface ImageOcrRequest {
   timeoutMs?: number;
   /** Read text-sized rectangles instead of the whole image. */
   regions?: boolean;
+  /** Point, in image pixels, whose nearby words are read with the rectangles. */
+  focusX?: number;
+  focusY?: number;
+  /** Recorded words. A focused read that already contains one skips the rest of the page. */
+  query?: string;
 }
 
 export interface ImageOcrResponse {

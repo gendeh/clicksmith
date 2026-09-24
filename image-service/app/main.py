@@ -772,40 +772,221 @@ def text_rectangles(image):
     return boxes
 
 
-def recognize_rectangles(image, timeout_s):
-    boxes = text_rectangles(image)
+def _boxes_overlap(left, right):
+    return not (
+        left[0] + left[2] < right[0]
+        or right[0] + right[2] < left[0]
+        or left[1] + left[3] < right[1]
+        or right[1] + right[3] < left[1]
+    )
 
-    def read_box(box):
-        x, y, width, height = box
-        crop = image[y : y + height, x : x + width]
-        if crop.size == 0:
-            return []
-        crop_height, crop_width = crop.shape[:2]
-        ocr_scale = 2 if 96 <= max(crop_height, crop_width) <= 448 else 1
-        scaled = crop
-        if ocr_scale != 1:
-            scaled = cv2.resize(
-                crop,
-                (crop_width * ocr_scale, crop_height * ocr_scale),
-                interpolation=cv2.INTER_CUBIC,
-            )
-        try:
-            data_dict = pytesseract.image_to_data(
-                scaled,
-                output_type=Output.DICT,
-                timeout=timeout_s,
-            )
-        except Exception:
-            return []
-        items, _line_text = items_from_tesseract(data_dict, ocr_scale, x, y)
-        return items
 
-    if not boxes:
+def text_line_boxes(image, occupied):
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    ink = np.where(gray < 200, 255, 0).astype(np.uint8)
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (15, 3))
+    dilated = cv2.dilate(ink, kernel, iterations=1)
+    contours, _ = cv2.findContours(dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    lines = []
+    for contour in contours:
+        x, y, width, height = cv2.boundingRect(contour)
+        if width < 24 or height < 6 or height > 22 or width > 180:
+            continue
+        box = (int(x), int(y), int(width), int(height))
+        if any(_boxes_overlap(box, kept) for kept in occupied):
+            continue
+        lines.append(box)
+    lines.sort(key=lambda box: (box[1], box[0]))
+    return lines[:16]
+
+
+def _ocr_image(image, origin_x, origin_y, timeout_s):
+    if image.size == 0:
         return []
+    height, width = image.shape[:2]
+    ocr_scale = 2 if 96 <= max(height, width) <= 448 else 1
+    scaled = image
+    if ocr_scale != 1:
+        scaled = cv2.resize(
+            image,
+            (width * ocr_scale, height * ocr_scale),
+            interpolation=cv2.INTER_CUBIC,
+        )
+    try:
+        data_dict = pytesseract.image_to_data(
+            scaled,
+            output_type=Output.DICT,
+            timeout=timeout_s,
+        )
+    except Exception:
+        return []
+    items, _line_text = items_from_tesseract(data_dict, ocr_scale, origin_x, origin_y)
+    return items
+
+
+def _ink_crop(image):
+    height, width = image.shape[:2]
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    ink_y, ink_x = np.where(gray < 200)
+    if ink_x.size == 0:
+        return None
+    pad = 8
+    left = max(0, int(ink_x.min()) - pad)
+    top = max(0, int(ink_y.min()) - pad)
+    right = min(width, int(ink_x.max()) + 1 + pad)
+    bottom = min(height, int(ink_y.max()) + 1 + pad)
+    if max(right - left, bottom - top) < 96 and max(height, width) >= 96:
+        need = 96
+        if right - left < need:
+            extra = need - (right - left)
+            left = max(0, left - extra // 2)
+            right = min(width, left + need)
+            left = max(0, right - need)
+        if bottom - top < need:
+            extra = need - (bottom - top)
+            top = max(0, top - extra // 2)
+            bottom = min(height, top + need)
+            top = max(0, bottom - need)
+    if right - left >= width - 4 and bottom - top >= height - 4:
+        return image, 0, 0
+    return image[top:bottom, left:right], left, top
+
+
+def _focus_items(image, focus_x, focus_y, timeout_s):
+    height, width = image.shape[:2]
+    if width < 96 or height < 96:
+        return []
+    try:
+        focus_x = float(focus_x)
+        focus_y = float(focus_y)
+    except (TypeError, ValueError):
+        return []
+    if not math.isfinite(focus_x) or not math.isfinite(focus_y):
+        return []
+    size = min(448, width, height)
+    half = size // 2
+    left = max(0, min(int(round(focus_x)) - half, width - size))
+    top = max(0, min(int(round(focus_y)) - half, height - size))
+    tightened = _ink_crop(image[top : top + size, left : left + size])
+    if tightened is None:
+        return []
+    ink, ink_left, ink_top = tightened
+    return _ocr_image(ink, left + ink_left, top + ink_top, timeout_s)
+
+
+def _line_mosaic_items(image, lines, timeout_s):
+    pad = 4
+    gap = 6
+    width = max(box[2] for box in lines) + pad * 2
+    height = pad + sum(box[3] + gap for box in lines)
+    canvas = np.full((height, width, 3), 255, dtype=np.uint8)
+    placements = []
+    cursor = pad
+    for x, y, box_width, box_height in lines:
+        canvas[cursor : cursor + box_height, pad : pad + box_width] = image[
+            y : y + box_height, x : x + box_width
+        ]
+        placements.append((cursor, x, y, box_height))
+        cursor += box_height + gap
+    mapped = []
+    for item in _ocr_image(canvas, 0, 0, timeout_s):
+        bounds = item["bounds"]
+        center_y = bounds["y"] + bounds["height"] / 2.0
+        host = None
+        for strip_top, origin_x, origin_y, strip_height in placements:
+            if strip_top - 2 <= center_y <= strip_top + strip_height + 2:
+                host = (origin_x, origin_y, strip_top)
+                break
+        if host is None:
+            continue
+        origin_x, origin_y, strip_top = host
+        mapped.append(
+            {
+                "text": item["text"],
+                "confidence": item["confidence"],
+                "bounds": {
+                    "x": int(origin_x + bounds["x"] - pad),
+                    "y": int(origin_y + bounds["y"] - strip_top),
+                    "width": int(bounds["width"]),
+                    "height": int(bounds["height"]),
+                },
+            }
+        )
+    return mapped
+
+
+def _normalize_ocr_word(value):
+    chars = []
+    for char in str(value).lower():
+        chars.append(char if char.isalnum() else " ")
+    return " ".join("".join(chars).split())
+
+
+def _edit_distance_at_most_one(left, right):
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) < len(right):
+        left, right = right, left
+    misses = 0
+    shorter = 0
+    for index, char in enumerate(left):
+        if shorter < len(right) and char == right[shorter]:
+            shorter += 1
+            continue
+        misses += 1
+        if misses > 1:
+            return False
+        if len(left) == len(right):
+            shorter += 1
+    return True
+
+
+def _query_found(items, query):
+    raw = _normalize_ocr_word(query)
+    tokens = [token for token in raw.split(" ") if len(token) >= 2]
+    if not tokens:
+        return False
+    words = []
+    for item in items:
+        word = _normalize_ocr_word(item.get("text", ""))
+        if not word or " " in word or len(word) < 2:
+            continue
+        words.append(word)
+    for token in tokens:
+        found = False
+        for word in words:
+            if word == token or (
+                len(word) >= 6
+                and len(token) >= 6
+                and _edit_distance_at_most_one(word, token)
+            ):
+                found = True
+                break
+        if not found:
+            return False
+    return True
+
+
+def recognize_rectangles(image, timeout_s, focus=None, query=None):
     items = []
-    with ThreadPoolExecutor(max_workers=min(6, len(boxes))) as pool:
-        for batch in pool.map(read_box, boxes):
-            items.extend(batch)
+    if focus is not None:
+        items.extend(_focus_items(image, focus[0], focus[1], timeout_s))
+        if query and _query_found(items, query):
+            return items[:MAX_OCR_ITEMS]
+    boxes = text_rectangles(image)
+    lines = text_line_boxes(image, boxes)
+    jobs = len(boxes) + (1 if lines else 0)
+    if jobs == 0:
+        return items[:MAX_OCR_ITEMS]
+    with ThreadPoolExecutor(max_workers=min(8, jobs)) as pool:
+        futures = [
+            pool.submit(_ocr_image, image[y : y + height, x : x + width], x, y, timeout_s)
+            for x, y, width, height in boxes
+        ]
+        if lines:
+            futures.append(pool.submit(_line_mosaic_items, image, lines, timeout_s))
+        for future in futures:
+            items.extend(future.result())
             if len(items) >= MAX_OCR_ITEMS:
                 break
     return items[:MAX_OCR_ITEMS]
@@ -821,7 +1002,16 @@ def ocr():
 
         image = base64_to_cv2(data["image"], max_pixels=MAX_OCR_PIXELS)
         if data.get("regions"):
-            items = recognize_rectangles(image, requested_ocr_timeout_seconds(data))
+            focus = None
+            if "focusX" in data and "focusY" in data:
+                focus = (data.get("focusX"), data.get("focusY"))
+            query = data.get("query") if isinstance(data.get("query"), str) else None
+            items = recognize_rectangles(
+                image,
+                requested_ocr_timeout_seconds(data),
+                focus,
+                query,
+            )
             processing_ms = int((time.time() - start_time) * 1000)
             text = "\n".join(item["text"] for item in items)[:MAX_OCR_TEXT_CHARS]
             return jsonify(

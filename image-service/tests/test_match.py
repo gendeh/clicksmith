@@ -810,6 +810,34 @@ def test_region_ocr_reads_a_button_below_the_neighborhood():
     assert y - 8 <= bounds["y"] <= y + height
 
 
+def test_region_ocr_reads_a_plain_line_outside_the_buttons():
+    app = create_app()
+    client = app.test_client()
+    page = np.full((800, 1100, 3), (251, 247, 245), dtype=np.uint8)
+    cv2.putText(page, "Filler 01", (210, 670), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (20, 20, 20), 1, cv2.LINE_AA)
+    res = client.post(
+        "/ocr",
+        json={
+            "image": to_base64(page),
+            "regions": True,
+            "timeoutMs": 800,
+            "focusX": 229,
+            "focusY": 265,
+        },
+    )
+    assert res.status_code == 200
+    data = res.get_json()
+    assert data["success"] is True
+    words = {
+        item["text"].strip(): item["bounds"]
+        for item in data["items"]
+        if " " not in item["text"].strip()
+    }
+    assert "Filler" in words
+    assert "01" in words
+    assert words["01"]["x"] > words["Filler"]["x"]
+
+
 def test_match_endpoint_caps_find_all_work():
     app = create_app()
     client = app.test_client()
