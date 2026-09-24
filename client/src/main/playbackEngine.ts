@@ -115,6 +115,10 @@ export class PlaybackEngine extends EventEmitter {
     private static readonly SMART_CLICK_OCR_RESERVE_MS = 120;
     private static readonly SMART_CLICK_CONTEXT_RESERVE_MS = 80;
     private static readonly SMART_CLICK_SCREEN_LOOKALIKE_CONFIDENCE = 0.30;
+    private static readonly SMART_CLICK_EDGE_CLIP_MIN_CONFIDENCE = 0.28;
+    private static readonly SMART_CLICK_TEMPLATE_EDGE_PX = 64;
+    private static readonly SMART_CLICK_WINDOW_NEAR_MISS_MIN = 0.40;
+    private static readonly SMART_CLICK_WINDOW_SCALE_FOLLOWUP = 1.33;
     private static readonly SMART_CLICK_MATCH_RESPONSE_GRACE_MS = 40;
     private static readonly SMART_CLICK_SCREEN_TEXT_REGION_BUDGET_MS = 100;
     private actions: PlaybackAction[] = [];
@@ -1915,7 +1919,7 @@ export class PlaybackEngine extends EventEmitter {
                     return fallbackCoords;
                 }
                 const targetCandidates = this.getMatchCandidates(targetResponse);
-                const pickedWindow = await this.pickBestSmartClickCandidate(
+                let pickedWindow = await this.pickBestSmartClickCandidate(
                     'target_window',
                     'relaxed',
                     event,
@@ -1952,6 +1956,59 @@ export class PlaybackEngine extends EventEmitter {
                     );
                     if (suggestedScale !== null) {
                         return this.resolveSmartClick(event, expected, false, telemetry, budgetDeadline, attempt);
+                    }
+                    const scaledNearMiss = targetCandidates.find((candidate) => {
+                        const method = (candidate.method ?? 'template').toLowerCase();
+                        const scale = Number(candidate.scale);
+                        return (
+                            method !== 'feature' &&
+                            candidate.confidence >= PlaybackEngine.SMART_CLICK_WINDOW_NEAR_MISS_MIN &&
+                            candidate.confidence < fullscreenThreshold &&
+                            Number.isFinite(scale) &&
+                            scale >= 1.2 &&
+                            Math.abs(scale - PlaybackEngine.SMART_CLICK_WINDOW_SCALE_FOLLOWUP) > 0.04
+                        );
+                    });
+                    const followBudget = Math.min(50, budgetLeftMs());
+                    if (scaledNearMiss && followBudget >= 40) {
+                        const followResponse = await this.imageService.matchImage({
+                            template: templateForMatch,
+                            templateHash,
+                            searchArea: targetArea.toString('base64'),
+                            threshold: fullscreenThreshold,
+                            method: 'template',
+                            findAll: false,
+                            maxMatches: 1,
+                            timeoutMs: followBudget + PlaybackEngine.SMART_CLICK_MATCH_RESPONSE_GRACE_MS,
+                            minScale: scaleWindow.minScale,
+                            maxScale: scaleWindow.maxScale,
+                            scaleHint: PlaybackEngine.SMART_CLICK_WINDOW_SCALE_FOLLOWUP,
+                            maxBudgetMs: followBudget,
+                        });
+                        const followError = String(followResponse.error ?? '');
+                        if (this.isServiceUnavailableErrorText(followError)) {
+                            this.markServiceUnavailableFallback();
+                            return fallbackCoords;
+                        }
+                        const followPick = await this.pickBestSmartClickCandidate(
+                            'target_window',
+                            'relaxed',
+                            event,
+                            expected,
+                            this.getMatchCandidates(followResponse),
+                            fullscreenThreshold,
+                            { x: targetRegion.x, y: targetRegion.y },
+                            1,
+                            preferredBounds,
+                            { image: targetArea, offsetX: targetRegion.x, offsetY: targetRegion.y },
+                            {
+                                adaptationMode,
+                                maxFeatureJumpPx: adaptationMode
+                                    ? Math.max(900, searchRadius * 2)
+                                    : Math.max(280, searchRadius),
+                            }
+                        );
+                        if (followPick) pickedWindow = followPick;
                     }
                 }
                 if (pickedWindow) {
@@ -2007,6 +2064,7 @@ export class PlaybackEngine extends EventEmitter {
 
             let screenRegionConfidence = 0;
             let screenRegionUnresolved = false;
+            let screenRegionEdgeClipped = false;
             if (imageStageOpen()) {
                 const searchCenter = fallbackCoords;
                 const region = clipNeighborhood(searchCenter, searchRadius);
@@ -2047,8 +2105,29 @@ export class PlaybackEngine extends EventEmitter {
                     return fallbackCoords;
                 }
                 const regionCandidates = this.getMatchCandidates(regionResponse);
-                screenRegionConfidence = regionCandidates[0]?.confidence ?? 0;
+                let bestTemplate = regionCandidates.find(
+                    (candidate) => (candidate.method ?? 'template').toLowerCase() !== 'feature'
+                );
+                for (const candidate of regionCandidates) {
+                    if ((candidate.method ?? 'template').toLowerCase() === 'feature') continue;
+                    if (!bestTemplate || candidate.confidence > bestTemplate.confidence) bestTemplate = candidate;
+                }
+                screenRegionConfidence = bestTemplate?.confidence ?? 0;
                 screenRegionUnresolved = regionCandidates.length === 0 && Boolean(regionResponse.error);
+                const templateEdge = bestTemplate
+                    ? Math.min(
+                          bestTemplate.x,
+                          bestTemplate.y,
+                          region.width - bestTemplate.x,
+                          region.height - bestTemplate.y
+                      )
+                    : Number.POSITIVE_INFINITY;
+                screenRegionEdgeClipped = Boolean(
+                    bestTemplate &&
+                        bestTemplate.confidence >= PlaybackEngine.SMART_CLICK_EDGE_CLIP_MIN_CONFIDENCE &&
+                        bestTemplate.confidence < strictThreshold &&
+                        templateEdge < PlaybackEngine.SMART_CLICK_TEMPLATE_EDGE_PX
+                );
                 const pickedRegion = await this.pickBestSmartClickCandidate(
                     'region',
                     'strict',
@@ -2354,6 +2433,7 @@ export class PlaybackEngine extends EventEmitter {
             if (
                 !preferredBounds &&
                 (screenRegionUnresolved ||
+                    screenRegionEdgeClipped ||
                     (screenRegionConfidence >= PlaybackEngine.SMART_CLICK_SCREEN_LOOKALIKE_CONFIDENCE &&
                         screenRegionConfidence < fullscreenThreshold))
             ) {
