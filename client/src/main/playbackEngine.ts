@@ -68,6 +68,7 @@ export class PlaybackEngine extends EventEmitter {
     private startedAt = 0;
     private pauseStartedAt: number | null = null;
     private pausedDurationMs = 0;
+    private dispatchingAction = false;
     private readonly schedulerLookaheadMs = 2;
     private smartClickResults = new Map<
         number,
@@ -164,6 +165,22 @@ export class PlaybackEngine extends EventEmitter {
         if (!this.startedAt) return 0;
         const now = this.pauseStartedAt ?? this.clock.now();
         return Math.max(0, now - this.startedAt - this.pausedDurationMs);
+    }
+
+    public getTakeoverAnchorMs(): number {
+        const elapsed = this.getElapsedMs();
+        if (!this.isPlaying) return elapsed;
+        const current = this.actions[this.currentActionIndex];
+        if (!current) return elapsed;
+        if (!this.dispatchingAction) {
+            return Math.min(elapsed, current.t_ms);
+        }
+        for (let i = this.currentActionIndex + 1; i < this.actions.length; i += 1) {
+            if (this.actions[i].t_ms > current.t_ms) {
+                return Math.min(elapsed, this.actions[i].t_ms);
+            }
+        }
+        return current.t_ms + 1;
     }
 
     public async start(config: PlaybackConfig, profile: Profile): Promise<{ success: boolean; error?: string }> {
@@ -423,15 +440,16 @@ export class PlaybackEngine extends EventEmitter {
                 this.startedAt += overdueMs;
             }
 
-            const coords =
-                action.type === 'mouseDown'
-                    ? await this.getSmartClickCoords(index, action.event, this.resolveCoords(action.event))
-                    : null;
-
-            const actualAt = this.clock.now();
-
+            this.dispatchingAction = true;
             let shouldAdvanceIndex = true;
+            let coords: { x: number; y: number } | null = null;
             try {
+                coords =
+                    action.type === 'mouseDown'
+                        ? await this.getSmartClickCoords(index, action.event, this.resolveCoords(action.event))
+                        : null;
+
+                const actualAt = this.clock.now();
                 if (!this.isPlaying) {
                     shouldAdvanceIndex = false;
                     break;
@@ -441,6 +459,7 @@ export class PlaybackEngine extends EventEmitter {
                 this.status = { ...this.status, lastError: 'playback_event_failed' };
                 this.emit('error', error);
             } finally {
+                this.dispatchingAction = false;
                 const postedAt = this.clock.now();
                 const smartClickWait = postedAt - scheduledAt;
                 if (smartClickWait > tolerance && coords !== null) {

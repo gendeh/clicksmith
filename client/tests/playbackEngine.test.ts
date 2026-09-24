@@ -1,5 +1,6 @@
 import { PlaybackEngine } from '../src/main/playbackEngine';
-import { PlaybackConfig, Profile } from '../src/types';
+import { mergeTakeoverEvents } from '../src/main/takeoverMerge';
+import { PlaybackConfig, Profile, RecordedEvent } from '../src/types';
 import * as screenCapture from '../src/main/screenCapture';
 import { computeDHash } from '../src/main/imageHash';
 
@@ -4013,6 +4014,190 @@ describe('PlaybackEngine', () => {
     await jest.advanceTimersByTimeAsync(80);
 
     expect(clicks[0]).toEqual({ x: 250, y: 160 });
+    await engine.stop();
+    captureSpy.mockRestore();
+    jest.useRealTimers();
+  });
+
+  test('a takeover during a match stitches at the click that has not played', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('window'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.95,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    let releaseMatch: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => {
+      releaseMatch = resolve;
+    });
+    const bounds = { x: 100, y: 40, width: 800, height: 600 };
+    const engine = new PlaybackEngine({
+      inputPlayer: {
+        moveMouse: () => undefined,
+        mouseDown: () => undefined,
+        mouseUp: () => undefined,
+        keyDown: () => undefined,
+        keyUp: () => undefined,
+      } as any,
+      imageService: {
+        matchImage: jest.fn(() => gate.then(() => ({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 5,
+        }))),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => bounds,
+        getTargetBoundsAsync: async () => bounds,
+        getKnownTargetBounds: () => bounds,
+      } as any,
+    });
+    const click = (t_ms: number, withPatch: boolean): RecordedEvent => ({
+      t_ms,
+      type: 'mouse',
+      btn: 'left',
+      x: 190,
+      y: 110,
+      rel_x: 90 / 800,
+      rel_y: 70 / 600,
+      duration_ms: 0,
+      human_override: false,
+      ...(withPatch ? { img_patch_b64: Buffer.from('template').toString('base64') } : {}),
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      target_app: 'Terminal',
+      events: [click(30, true), click(200, false)],
+    };
+    await engine.start(
+      {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: true,
+        useRelativeCoords: true,
+        imageMatchThreshold: 0.6,
+        retryCount: 0,
+      },
+      profile
+    );
+    let anchor = -1;
+    let elapsed = -1;
+    setTimeout(() => {
+      anchor = engine.getTakeoverAnchorMs();
+      elapsed = engine.getElapsedMs();
+    }, 300);
+    setTimeout(() => releaseMatch(), 320);
+    await jest.advanceTimersByTimeAsync(400);
+
+    expect(elapsed).toBeGreaterThan(200);
+    expect(anchor).toBe(200);
+    const human: RecordedEvent = { ...click(0, true), human_override: true };
+    const merged = mergeTakeoverEvents(profile, anchor, [human]);
+    expect(merged.map(event => event.t_ms)).toEqual([30, 200]);
+    expect(merged[1].human_override).toBe(true);
+    await engine.stop();
+    captureSpy.mockRestore();
+    jest.useRealTimers();
+  });
+
+  test('a takeover during the last match starts the human click on the next millisecond', async () => {
+    jest.useFakeTimers();
+    jest.setSystemTime(new Date('2020-01-01T00:00:00Z'));
+    const captureSpy = jest.spyOn(screenCapture, 'captureRegion').mockResolvedValue(Buffer.from('window'));
+    const match = {
+      x: 90,
+      y: 70,
+      confidence: 0.95,
+      method: 'template' as const,
+      scale: 1,
+      bounds: { x: 74, y: 54, width: 32, height: 32 },
+    };
+    let releaseMatch: () => void = () => undefined;
+    const gate = new Promise<void>(resolve => {
+      releaseMatch = resolve;
+    });
+    const bounds = { x: 100, y: 40, width: 800, height: 600 };
+    const engine = new PlaybackEngine({
+      inputPlayer: {
+        moveMouse: () => undefined,
+        mouseDown: () => undefined,
+        mouseUp: () => undefined,
+        keyDown: () => undefined,
+        keyUp: () => undefined,
+      } as any,
+      imageService: {
+        matchImage: jest.fn(() => gate.then(() => ({
+          success: true,
+          matches: [match],
+          bestMatch: match,
+          processingTimeMs: 5,
+        }))),
+      } as any,
+      windowManager: {
+        getTargetBounds: () => bounds,
+        getTargetBoundsAsync: async () => bounds,
+        getKnownTargetBounds: () => bounds,
+      } as any,
+    });
+    const profile: Profile = {
+      ...baseProfile,
+      target_app: 'Terminal',
+      events: [
+        {
+          t_ms: 30,
+          type: 'mouse',
+          btn: 'left',
+          x: 190,
+          y: 110,
+          rel_x: 90 / 800,
+          rel_y: 70 / 600,
+          duration_ms: 0,
+          human_override: false,
+          img_patch_b64: Buffer.from('template').toString('base64'),
+        },
+      ],
+    };
+    await engine.start(
+      {
+        ...config,
+        target: 'Terminal',
+        useImageMatching: true,
+        useRelativeCoords: true,
+        imageMatchThreshold: 0.6,
+        retryCount: 0,
+      },
+      profile
+    );
+    let anchor = -1;
+    let elapsed = -1;
+    setTimeout(() => {
+      anchor = engine.getTakeoverAnchorMs();
+      elapsed = engine.getElapsedMs();
+    }, 300);
+    setTimeout(() => releaseMatch(), 320);
+    await jest.advanceTimersByTimeAsync(400);
+
+    expect(elapsed).toBeGreaterThan(30);
+    expect(anchor).toBe(31);
+    const human: RecordedEvent = {
+      t_ms: 0,
+      type: 'mouse',
+      btn: 'left',
+      x: 10,
+      y: 10,
+      rel_x: 0,
+      rel_y: 0,
+      duration_ms: 0,
+      human_override: true,
+    };
+    const merged = mergeTakeoverEvents(profile, anchor, [human]);
+    expect(merged.map(event => event.t_ms)).toEqual([30, 31]);
     await engine.stop();
     captureSpy.mockRestore();
     jest.useRealTimers();

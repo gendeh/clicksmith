@@ -1207,7 +1207,7 @@ async function startLocalTakeover(triggerEvent?: HookMouseEvent): Promise<{ succ
     return { success: false, error: 'not_playing' };
   }
   pendingTakeoverProfile = lastPlaybackProfile;
-  pendingTakeoverStartMs = Math.max(0, playbackEngine.getElapsedMs() + lastPlaybackLeadInMs);
+  pendingTakeoverStartMs = Math.max(0, playbackEngine.getTakeoverAnchorMs() + lastPlaybackLeadInMs);
   const target = lastPlaybackTarget ?? lastPlaybackProfile.target_app ?? 'screen';
   currentRecordingTarget = target;
   disarmAutoTakeoverHook();
